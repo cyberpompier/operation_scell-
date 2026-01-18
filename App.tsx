@@ -1,3 +1,4 @@
+
 import React, { useState, useEffect, useRef } from 'react';
 import Peer, { DataConnection } from 'peerjs';
 import { Role, GameStatus, Player, GameSession } from './types.ts';
@@ -17,8 +18,8 @@ const App: React.FC = () => {
   
   const peerRef = useRef<Peer | null>(null);
   const connectionsRef = useRef<{ [id: string]: DataConnection }>({});
-  const sessionRef = useRef<GameSession | null>(null);
-
+  
+  // État de la session avec Ref pour accès synchrone dans les callbacks
   const [session, setSession] = useState<GameSession>({
     code: '',
     players: [],
@@ -26,23 +27,22 @@ const App: React.FC = () => {
     sabotage: { isActive: false, startTime: null, targetId: null, status: 'IDLE' },
     codisCheckUsed: false
   });
-  
-  const [currentPlayer, setCurrentPlayer] = useState<Player | null>(null);
-  const [briefing, setBriefing] = useState<string>('');
-  const [intelReport, setIntelReport] = useState<string | null>(null);
-  const [lastNotificationTime, setLastNotificationTime] = useState<string | null>(null);
-  const [capturedPhoto, setCapturedPhoto] = useState<string | null>(null);
-  const [sabotageTimeLeft, setSabotageTimeLeft] = useState<number>(SABOTAGE_TIMER_MS);
-  const [showSuccessOverlay, setShowSuccessOverlay] = useState(false);
+  const sessionRef = useRef<GameSession>(session);
 
   useEffect(() => {
     sessionRef.current = session;
   }, [session]);
 
+  const [currentPlayer, setCurrentPlayer] = useState<Player | null>(null);
+  const [briefing, setBriefing] = useState<string>('');
+  const [intelReport, setIntelReport] = useState<string | null>(null);
+  const [capturedPhoto, setCapturedPhoto] = useState<string | null>(null);
+  const [sabotageTimeLeft, setSabotageTimeLeft] = useState<number>(SABOTAGE_TIMER_MS);
+  const [showSuccessOverlay, setShowSuccessOverlay] = useState(false);
+
+  // Fonction de diffusion (Host uniquement)
   const broadcastSession = (newSession: GameSession) => {
-    if (!isHost) return;
     setSession(newSession);
-    // Fix: Explicitly cast connections to DataConnection[] to resolve 'unknown' type inference in TypeScript
     const conns = Object.values(connectionsRef.current) as DataConnection[];
     conns.forEach(conn => {
       if (conn && conn.open) {
@@ -51,33 +51,22 @@ const App: React.FC = () => {
     });
   };
 
-  const sendToHost = (type: string, payload: any) => {
-    if (isHost) {
-      handleClientAction(currentPlayer?.id || 'mj', { type, payload });
-      return;
-    }
-    const hostConn = (Object.values(connectionsRef.current) as DataConnection[])[0];
-    if (hostConn && hostConn.open) {
-      hostConn.send({ type, payload, senderId: currentPlayer?.id });
-    } else {
-      console.warn("[UNITÉ] Canal vers MJ indisponible");
-    }
-  };
-
+  // Logique de traitement des actions (Host uniquement)
+  // Utilisation d'une ref pour que les callbacks PeerJS appellent toujours la version la plus récente
   const handleClientAction = (senderId: string, action: { type: string, payload: any }) => {
-    if (!isHost) return;
-    const current = sessionRef.current!;
-    
-    console.log(`[MJ] Logique métier - Action ${action.type} reçue de ${senderId}`);
+    const current = sessionRef.current;
+    console.log(`[MJ] Traitement Action: ${action.type} de ${senderId}`);
 
     switch (action.type) {
       case 'JOIN':
         const newPlayer = action.payload as Player;
-        if (!current.players.find(p => p.id === newPlayer.id)) {
-          console.log(`[MJ] NOUVEL AGENT INCORPORÉ : ${newPlayer.name}`);
+        const exists = current.players.find(p => p.id === newPlayer.id);
+        if (!exists) {
+          console.log(`[MJ] + AGENT DÉTECTÉ : ${newPlayer.name} (${newPlayer.id})`);
           const updatedPlayers = [...current.players, newPlayer];
           broadcastSession({ ...current, players: updatedPlayers });
         } else {
+          console.log(`[MJ] Agent déjà connu : ${newPlayer.name}`);
           broadcastSession({ ...current });
         }
         break;
@@ -95,7 +84,7 @@ const App: React.FC = () => {
           alertMsg: "SABOTAGE DÉJOUÉ PAR LA GARDE !"
         });
         setTimeout(() => {
-            if(sessionRef.current) broadcastSession({ ...sessionRef.current, alertMsg: undefined });
+            broadcastSession({ ...sessionRef.current, alertMsg: undefined });
         }, 4000);
         break;
       case 'SABOTAGE_COMPLETE':
@@ -117,26 +106,37 @@ const App: React.FC = () => {
     }
   };
 
+  const actionRef = useRef(handleClientAction);
+  useEffect(() => { actionRef.current = handleClientAction; });
+
+  const sendToHost = (type: string, payload: any) => {
+    if (isHost) {
+      actionRef.current(currentPlayer?.id || 'mj', { type, payload });
+      return;
+    }
+    const hostConn = (Object.values(connectionsRef.current) as DataConnection[])[0];
+    if (hostConn && hostConn.open) {
+      hostConn.send({ type, payload, senderId: currentPlayer?.id });
+    }
+  };
+
   const handleCreateGame = () => {
     setErrorMessage(null);
     setIsHost(true);
     setConnectionStatus('CONNECTING');
     
     const adminId = 'mj-' + Math.random().toString(36).substr(2, 4);
-    const admin: Player = { 
-      id: adminId, 
-      name: inputName || 'CENTRAL_MJ', 
-      role: Role.MJ, 
-      isNeutralised: false 
-    };
+    const admin: Player = { id: adminId, name: inputName || 'CENTRAL_MJ', role: Role.MJ, isNeutralised: false };
     setCurrentPlayer(admin);
-    setSession({
+    
+    const initialSession: GameSession = {
       code: '',
       players: [admin],
       status: GameStatus.LOBBY,
       sabotage: { isActive: false, startTime: null, targetId: null, status: 'IDLE' },
       codisCheckUsed: false
-    });
+    };
+    setSession(initialSession);
 
     const p = new Peer();
     peerRef.current = p;
@@ -145,35 +145,25 @@ const App: React.FC = () => {
       setPeerId(id);
       setConnectionStatus('CONNECTED');
       setSession(prev => ({ ...prev, code: id }));
-      console.log("[MJ] TERMINAL OPÉRATIONNEL - ID:", id);
+      console.log("[MJ] SERVEUR ACTIF - ID:", id);
     });
 
     p.on('connection', (conn) => {
-      console.log(`[MJ] Liaison entrante détectée : ${conn.peer}`);
-      
-      // On stocke immédiatement la connexion
+      console.log(`[MJ] Connexion entrante : ${conn.peer}`);
       connectionsRef.current[conn.peer] = conn;
 
       conn.on('open', () => {
-        console.log(`[MJ] Canal ouvert avec ${conn.peer}. Envoi du Handshake...`);
-        // Force l'envoi de l'état actuel pour synchroniser le client
+        console.log(`[MJ] Canal ouvert avec ${conn.peer}. Envoi configuration...`);
         conn.send({ type: 'HANDSHAKE_OK', payload: sessionRef.current });
       });
 
       conn.on('data', (data: any) => {
-        console.log(`[MJ] Données brutes reçues de ${conn.peer}:`, data);
         if (data && data.type) {
-          handleClientAction(data.senderId || conn.peer, data);
+          actionRef.current(data.senderId || conn.peer, data);
         }
       });
 
       conn.on('close', () => {
-        console.log(`[MJ] Perte de liaison avec ${conn.peer}`);
-        delete connectionsRef.current[conn.peer];
-      });
-      
-      conn.on('error', (err) => {
-        console.error(`[MJ] Erreur sur canal ${conn.peer}:`, err);
         delete connectionsRef.current[conn.peer];
       });
     });
@@ -187,7 +177,7 @@ const App: React.FC = () => {
   const handleJoinGame = () => {
     const cleanCode = inputCode.trim();
     if (!cleanCode) {
-      setErrorMessage("Code session requis");
+      setErrorMessage("Code MJ requis");
       return;
     }
     setErrorMessage(null);
@@ -203,59 +193,41 @@ const App: React.FC = () => {
 
     p.on('open', (myId) => {
       setPeerId(myId);
-      console.log(`[UNITÉ] Tentative de liaison vers ${cleanCode}...`);
       const conn = p.connect(cleanCode, { reliable: true });
       
       const timeout = setTimeout(() => {
         if (connectionStatus !== 'CONNECTED') {
-          setErrorMessage("MJ Hors-ligne ou canal saturé.");
+          setErrorMessage("Échec liaison MJ.");
           setConnectionStatus('DISCONNECTED');
           p.destroy();
         }
-      }, 10000);
+      }, 8000);
 
       conn.on('open', () => {
         clearTimeout(timeout);
-        console.log("[UNITÉ] Canal établi.");
         connectionsRef.current[cleanCode] = conn;
         setConnectionStatus('CONNECTED');
-        
-        // On envoie le JOIN systématiquement après 1s si le Handshake n'a pas répondu
-        setTimeout(() => {
-          if (connectionsRef.current[cleanCode]?.open) {
-            console.log("[UNITÉ] Envoi JOIN (SÉCURITÉ)");
-            connectionsRef.current[cleanCode].send({ type: 'JOIN', payload: player, senderId: playerId });
-          }
-        }, 1200);
+        // Identification immédiate
+        conn.send({ type: 'JOIN', payload: player, senderId: playerId });
       });
 
       conn.on('data', (data: any) => {
         if (data.type === 'HANDSHAKE_OK' || data.type === 'SYNC_SESSION') {
-          console.log(`[UNITÉ] Réception données tactiques (${data.type})`);
-          if (data.payload) {
-            setSession(data.payload);
-          }
+          if (data.payload) setSession(data.payload);
           if (data.type === 'HANDSHAKE_OK') {
-             console.log("[UNITÉ] Handshake validé, envoi identification JOIN");
              conn.send({ type: 'JOIN', payload: player, senderId: playerId });
           }
         }
       });
 
-      conn.on('error', (err) => {
-        setErrorMessage("Liaison interrompue.");
-        setConnectionStatus('DISCONNECTED');
-      });
-
       conn.on('close', () => {
         setConnectionStatus('DISCONNECTED');
-        setErrorMessage("Déconnecté du MJ.");
+        setErrorMessage("Liaison Central coupée.");
       });
     });
 
     p.on('error', (err) => {
-      if (err.type === 'peer-not-found') setErrorMessage("Session MJ introuvable.");
-      else setErrorMessage(`Erreur liaison : ${err.type}`);
+      setErrorMessage(`Erreur liaison : ${err.type}`);
       setConnectionStatus('DISCONNECTED');
     });
   };
@@ -274,7 +246,7 @@ const App: React.FC = () => {
         const remaining = Math.max(0, SABOTAGE_TIMER_MS - elapsed);
         setSabotageTimeLeft(remaining);
         if (remaining <= 0 && isHost) {
-          broadcastSession({ ...sessionRef.current!, sabotage: { ...sessionRef.current!.sabotage, status: 'READY_FOR_UPLOAD' } });
+          broadcastSession({ ...sessionRef.current, sabotage: { ...sessionRef.current.sabotage, status: 'READY_FOR_UPLOAD' } });
           clearInterval(timer);
         }
       }, 1000);
@@ -287,7 +259,7 @@ const App: React.FC = () => {
     const players = [...session.players];
     const nonAdmin = players.filter(p => p.role !== Role.MJ);
     if (nonAdmin.length < 1) {
-        setErrorMessage("Effectif insuffisant pour lancer la garde.");
+        setErrorMessage("Effectif insuffisant.");
         return;
     }
     const rolesPool = [Role.INFILTRÉ, Role.CODIS];
@@ -314,12 +286,12 @@ const App: React.FC = () => {
         )}
 
         {connectionStatus !== 'CONNECTED' && !isHost ? (
-          <HUDFrame title="Connexion Terminal">
+          <HUDFrame title="Initialisation Unité">
             <div className="space-y-4 py-4">
               <input 
                 value={inputName} onChange={e => setInputName(e.target.value)}
                 className="w-full bg-slate-900 border border-slate-700 p-4 text-[#F0FF00] placeholder:opacity-20 outline-none text-sm font-mono tracking-widest focus:border-[#F0FF00]" 
-                placeholder="IDENTIFIANT AGENT" 
+                placeholder="ID AGENT" 
               />
               <div className="grid grid-cols-2 gap-4 pt-2">
                 <button 
@@ -327,7 +299,7 @@ const App: React.FC = () => {
                     onClick={handleCreateGame} 
                     className="border-2 border-[#F0FF00] p-4 text-xs font-black uppercase tracking-widest hover:bg-[#F0FF00] hover:text-[#0A192F] transition-all disabled:opacity-30"
                 >
-                    POSTE MJ
+                    POSTE CENTRAL
                 </button>
                 <div className="flex flex-col space-y-2">
                    <input 
@@ -348,17 +320,17 @@ const App: React.FC = () => {
             </div>
           </HUDFrame>
         ) : (
-          <HUDFrame title={isHost ? "Terminal Central (MJ)" : "Unité Mobile"}>
+          <HUDFrame title={isHost ? "Terminal Central (MJ)" : "Unité de Garde"}>
             <div className="space-y-4 py-4 text-center">
               <div className="bg-slate-900/90 p-5 border border-slate-700 shadow-2xl relative overflow-hidden">
-                <p className="text-[10px] opacity-40 uppercase mb-2 font-black tracking-widest">Fréquence de Liaison</p>
+                <p className="text-[10px] opacity-40 uppercase mb-2 font-black tracking-widest">Fréquence Opérationnelle</p>
                 <p className="text-2xl font-mono font-black tracking-[0.2em] text-[#F0FF00] select-all break-all">
-                    {session.code || peerId || "ÉTABLISSEMENT..."}
+                    {session.code || peerId || "SYNC..."}
                 </p>
               </div>
               
               <div className="flex justify-between items-center px-1">
-                 <span className="text-[10px] text-slate-400 uppercase tracking-widest font-black">Agents en ligne : {session.players.length}</span>
+                 <span className="text-[10px] text-slate-400 uppercase tracking-widest font-black">Agents : {session.players.length}</span>
                  <div className="flex space-x-1">
                     {[...Array(session.players.length)].map((_,i) => <div key={i} className="w-2 h-3 bg-[#F0FF00] animate-pulse"></div>)}
                  </div>
@@ -366,7 +338,7 @@ const App: React.FC = () => {
 
               <ul className="space-y-1 text-[11px] max-h-56 overflow-y-auto text-left font-mono border-t border-slate-800 pt-3">
                 {session.players.map(p => (
-                  <li key={p.id} className="flex justify-between items-center border-b border-slate-900/50 py-3 px-2 hover:bg-slate-800/20">
+                  <li key={p.id} className="flex justify-between items-center border-b border-slate-900/50 py-3 px-2">
                     <span className={p.id === currentPlayer?.id ? "text-[#F0FF00] font-black" : "text-slate-400"}>
                         {p.id === currentPlayer?.id ? ">> " : "   "}{p.name}
                     </span>
@@ -383,12 +355,12 @@ const App: React.FC = () => {
                     disabled={session.players.length < 2} 
                     className="w-full mt-6 bg-[#F0FF00] text-[#0A192F] p-5 font-black tracking-[0.3em] text-sm uppercase disabled:opacity-20 shadow-[0_0_40px_rgba(240,255,0,0.2)] active:scale-95 transition-transform"
                 >
-                    INITIALISER LA GARDE
-</button>
+                    DÉPLOYER LA GARDE
+                </button>
               ) : (
                 <div className="py-8 flex flex-col items-center">
-                    <div className="w-10 h-10 border-4 border-[#F0FF00] border-t-transparent rounded-full animate-spin mb-4 shadow-[0_0_15px_rgba(240,255,0,0.3)]"></div>
-                    <p className="text-[10px] uppercase tracking-[0.4em] text-blue-400 font-black animate-pulse">Liaison établie. Attente des ordres...</p>
+                    <div className="w-10 h-10 border-4 border-[#F0FF00] border-t-transparent rounded-full animate-spin mb-4"></div>
+                    <p className="text-[10px] uppercase tracking-[0.4em] text-blue-400 font-black animate-pulse">Liaison établie. En attente...</p>
                 </div>
               )}
             </div>
