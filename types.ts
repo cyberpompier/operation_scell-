@@ -25,8 +25,7 @@ export interface SabotageState {
   isActive: boolean;
   startTime: number | null;
   targetId: string | null;
-  // Added 'TRANSMITTING' to the allowed status values for upload feedback
-  status: 'IDLE' | 'PENDING' | 'READY_FOR_UPLOAD' | 'TRANSMITTING' | 'COMPLETED' | 'DEJOUÉ';
+  status: 'IDLE' | 'PENDING' | 'READY_FOR_UPLOAD' | 'TRANSMITTING' | 'VERIFYING' | 'COMPLETED' | 'DEJOUÉ';
   photoUri?: string;
 }
 

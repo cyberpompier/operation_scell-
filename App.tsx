@@ -1,9 +1,9 @@
 
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { Role, GameStatus, Player, GameSession, SabotageState } from './types';
-import { COLORS, RETICLE_ICON, DOSSIER_ICON, CHRONOGRAM_TIMES } from './constants';
-import HUDFrame from './components/HUDFrame';
-import { generateBriefing, analyzeIntel } from './services/geminiService';
+import { Role, GameStatus, Player, GameSession, SabotageState } from './types.ts';
+import { COLORS, RETICLE_ICON, DOSSIER_ICON, CHRONOGRAM_TIMES } from './constants.tsx';
+import HUDFrame from './components/HUDFrame.tsx';
+import { generateBriefing, analyzeIntel } from './services/geminiService.ts';
 
 const SABOTAGE_TIMER_MS = 10 * 60 * 1000; // 10 minutes réglementaires
 
@@ -171,16 +171,21 @@ const App: React.FC = () => {
 
     // Simulation de transmission sécurisée
     setTimeout(() => {
-      setShowSuccessOverlay(true);
+      // Phase de vérification
+      setSession(prev => ({ ...prev, sabotage: { ...prev.sabotage, status: 'VERIFYING' } }));
+      
       setTimeout(() => {
-        setShowSuccessOverlay(false);
-        setSession(prev => ({
-          ...prev,
-          sabotage: { ...prev.sabotage, status: 'COMPLETED', photoUri: capturedPhoto, isActive: false },
-          alertMsg: "SABOTAGE RÉUSSI - SCELLÉ COMPROMIS"
-        }));
-        setCapturedPhoto(null);
-      }, 3000);
+        setShowSuccessOverlay(true);
+        setTimeout(() => {
+          setShowSuccessOverlay(false);
+          setSession(prev => ({
+            ...prev,
+            sabotage: { ...prev.sabotage, status: 'COMPLETED', photoUri: capturedPhoto, isActive: false },
+            alertMsg: "SABOTAGE RÉUSSI - SCELLÉ COMPROMIS"
+          }));
+          setCapturedPhoto(null);
+        }, 4000);
+      }, 2000);
     }, 2500);
   };
 
@@ -249,11 +254,20 @@ const App: React.FC = () => {
 
   return (
     <div className="flex flex-col h-full app-container relative">
-      {/* SUCCESS OVERLAY */}
+      {/* SABOTAGE RÉUSSI OVERLAY */}
       {showSuccessOverlay && (
-        <div className="fixed inset-0 z-[150] bg-green-950/90 flex flex-col items-center justify-center p-8 text-center border-4 border-green-500 animate-pulse">
-          <h2 className="text-5xl font-black text-white italic mb-4 glow-neon">MISSION ACCOMPLIE</h2>
-          <p className="text-sm text-green-100 opacity-80 uppercase tracking-widest">Le scellé a été transmis avec succès.</p>
+        <div className="fixed inset-0 z-[200] bg-black/90 flex flex-col items-center justify-center p-8 text-center border-[12px] border-green-500 animate-neon-green">
+          <div className="relative mb-12">
+            <div className="absolute -inset-8 border border-green-400/30 rounded-full animate-ping"></div>
+            <div className="text-green-500 scale-[3]">
+                {RETICLE_ICON}
+            </div>
+          </div>
+          <h2 className="text-5xl font-black text-green-400 italic mb-6 glow-green tracking-tighter uppercase">SABOTAGE RÉUSSI</h2>
+          <div className="bg-green-500/20 px-6 py-2 border border-green-500/50">
+             <p className="text-sm text-green-200 font-bold uppercase tracking-[0.3em]">Scellé Neutralisé</p>
+          </div>
+          <p className="mt-8 text-[10px] text-green-500/60 uppercase tracking-widest font-mono">Transmission terminée. Identité protégée.</p>
         </div>
       )}
 
@@ -298,7 +312,7 @@ const App: React.FC = () => {
           </div>
         </HUDFrame>
 
-        {currentPlayer?.role === Role.INFILTRÉ && !session.sabotage.isActive && session.sabotage.status !== 'COMPLETED' && session.sabotage.status !== 'TRANSMITTING' && (
+        {currentPlayer?.role === Role.INFILTRÉ && !session.sabotage.isActive && session.sabotage.status !== 'COMPLETED' && session.sabotage.status !== 'TRANSMITTING' && session.sabotage.status !== 'VERIFYING' && (
           <HUDFrame title="Action Offensive" variant="alert">
             <button onClick={launchSabotage} className="w-full bg-red-600 text-white p-4 font-bold flex items-center justify-center space-x-2"><span>LANCER SABOTAGE</span></button>
             <p className="text-[9px] mt-2 opacity-50 uppercase text-center">Règle de latence : 10 minutes avant validation.</p>
@@ -315,6 +329,25 @@ const App: React.FC = () => {
                   <p className="text-red-500 font-bold animate-pulse text-xs tracking-widest uppercase">Transmission des données scellées...</p>
                   <p className="text-[8px] opacity-40 mt-1">CRYPTAGE DES DONNÉES EN COURS</p>
                 </div>
+             </div>
+          </HUDFrame>
+        )}
+
+        {currentPlayer?.role === Role.INFILTRÉ && session.sabotage.status === 'VERIFYING' && (
+          <HUDFrame title="Confirmation Tactique" variant="neon">
+             <div className="flex flex-col items-center justify-center py-6 space-y-4">
+                <div className="w-12 h-12 border-2 border-green-500 rounded-full flex items-center justify-center animate-pulse">
+                  <svg className="w-6 h-6 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="3" d="M5 13l4 4L19 7" />
+                  </svg>
+                </div>
+                <div className="bg-slate-900/90 border border-slate-800 p-4 font-mono text-[10px] w-full text-green-400 space-y-1">
+                  <p className="animate-pulse">> UPLINK: STABLE</p>
+                  <p className="animate-pulse delay-75">> CHECKSUM: VALIDÉ</p>
+                  <p className="animate-pulse delay-150">> SCELLÉ: NEUTRALISÉ</p>
+                  <p className="animate-pulse delay-300 font-bold text-green-300">> MISSION: ACCEPTÉE</p>
+                </div>
+                <p className="text-green-500 font-bold text-xs animate-pulse tracking-widest uppercase">Signature validée. Neutralisation confirmée.</p>
              </div>
           </HUDFrame>
         )}
