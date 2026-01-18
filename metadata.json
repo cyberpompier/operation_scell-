@@ -1,0 +1,7 @@
+{
+  "name": "Opération Scellé - Tactical Guard Game",
+  "description": "Un jeu de rôle caché tactique pour sapeurs-pompiers. Gérez des missions d'infiltration, des sabotages et des enquêtes CODIS dans une interface HUD militaire haute performance.",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}
