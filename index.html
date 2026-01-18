@@ -3,17 +3,22 @@
 <html lang="fr">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Opération Scellé</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=Orbitron:wght@400;700&display=swap" rel="stylesheet">
     <style>
+        :host,
+        html {
+            -webkit-text-size-adjust: 100%;
+        }
         body {
             background-color: #0A192F;
             color: #F0FF00;
             font-family: 'JetBrains+Mono', monospace;
-            overflow: hidden;
-            user-select: none;
+            overflow-x: hidden;
+            margin: 0;
+            padding: 0;
         }
         .hud-grid {
             background-image: linear-gradient(rgba(240, 255, 0, 0.05) 1px, transparent 1px),
@@ -63,9 +68,10 @@
         .glow-red {
             text-shadow: 0 0 10px rgba(255, 0, 0, 0.7);
         }
-        /* Mobile-first specific height adjustments */
         .app-container {
-            height: 100dvh;
+            min-height: 100dvh;
+            display: flex;
+            flex-direction: column;
         }
     </style>
 <script type="importmap">
