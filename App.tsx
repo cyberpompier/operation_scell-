@@ -36,7 +36,7 @@ const App: React.FC = () => {
   const [sabotageTimeLeft, setSabotageTimeLeft] = useState<number>(SABOTAGE_TIMER_MS);
   const [showSuccessOverlay, setShowSuccessOverlay] = useState(false);
 
-  // Synchronisation du ref pour les callbacks asynchrones
+  // Synchronisation du ref pour éviter les fermetures obsolètes (stale closures)
   useEffect(() => {
     sessionRef.current = session;
   }, [session]);
@@ -46,7 +46,7 @@ const App: React.FC = () => {
     setSession(newSession);
     const conns = Object.values(connectionsRef.current) as DataConnection[];
     conns.forEach(conn => {
-      if (conn.open) {
+      if (conn && conn.open) {
         conn.send({ type: 'SYNC_SESSION', payload: newSession });
       }
     });
@@ -54,12 +54,14 @@ const App: React.FC = () => {
 
   const sendToHost = (type: string, payload: any) => {
     if (isHost) {
-      handleClientAction(currentPlayer?.id || 'host', { type, payload });
+      handleClientAction(currentPlayer?.id || 'mj', { type, payload });
       return;
     }
     const hostConn = (Object.values(connectionsRef.current) as DataConnection[])[0];
     if (hostConn && hostConn.open) {
       hostConn.send({ type, payload, senderId: currentPlayer?.id });
+    } else {
+      console.warn("[UNITÉ] Canal vers MJ fermé ou inexistant");
     }
   };
 
@@ -67,17 +69,18 @@ const App: React.FC = () => {
     if (!isHost) return;
     const current = sessionRef.current!;
     
+    console.log(`[MJ] Action reçue de ${senderId}:`, action.type);
+
     switch (action.type) {
       case 'JOIN':
         const newPlayer = action.payload as Player;
-        // Protection contre les doublons mais mise à jour si nécessaire
-        const exists = current.players.find(p => p.id === newPlayer.id);
-        if (!exists) {
-          console.log(`[MJ] Unité connectée : ${newPlayer.name}`);
+        const playerExists = current.players.find(p => p.id === newPlayer.id);
+        if (!playerExists) {
+          console.log(`[MJ] Incorporation validée pour : ${newPlayer.name}`);
           const updatedPlayers = [...current.players, newPlayer];
           broadcastSession({ ...current, players: updatedPlayers });
         } else {
-          // Si le joueur existe déjà, on renvoie juste la session pour le resynchroniser
+          // Joueur déjà présent, on renvoie simplement la session actuelle pour le rafraîchir
           broadcastSession({ ...current });
         }
         break;
@@ -122,8 +125,9 @@ const App: React.FC = () => {
     setIsHost(true);
     setConnectionStatus('CONNECTING');
     
+    const adminId = 'mj-' + Math.random().toString(36).substr(2, 4);
     const admin: Player = { 
-      id: 'mj-' + Math.random().toString(36).substr(2, 4), 
+      id: adminId, 
       name: inputName || 'CENTRAL_MJ', 
       role: Role.MJ, 
       isNeutralised: false 
@@ -142,17 +146,20 @@ const App: React.FC = () => {
 
     p.on('open', (id) => {
       setPeerId(id);
-      setInputCode(id);
       setConnectionStatus('CONNECTED');
       setSession(prev => ({ ...prev, code: id }));
+      console.log("[MJ] Serveur PeerJS ouvert ID:", id);
     });
 
     p.on('connection', (conn) => {
-      console.log(`[MJ] Tentative de liaison entrante : ${conn.peer}`);
+      console.log(`[MJ] Tentative de connexion de: ${conn.peer}`);
       
+      // Enregistrement immédiat pour pouvoir répondre
+      connectionsRef.current[conn.peer] = conn;
+
       conn.on('open', () => {
-        connectionsRef.current[conn.peer] = conn;
-        // Handshake : Informer le client que le canal est prêt
+        console.log(`[MJ] Canal de données ouvert avec: ${conn.peer}`);
+        // Handshake : Informer le client que le MJ est prêt et envoyer la session
         conn.send({ type: 'HANDSHAKE_OK', payload: sessionRef.current });
       });
 
@@ -163,23 +170,25 @@ const App: React.FC = () => {
       });
 
       conn.on('close', () => {
-        console.log(`[MJ] Liaison perdue : ${conn.peer}`);
+        console.log(`[MJ] Connexion fermée: ${conn.peer}`);
         delete connectionsRef.current[conn.peer];
       });
       
-      conn.on('error', () => {
+      conn.on('error', (err) => {
+        console.error(`[MJ] Erreur connexion ${conn.peer}:`, err);
         delete connectionsRef.current[conn.peer];
       });
     });
 
     p.on('error', (err) => {
+      console.error("[MJ] PeerJS Error:", err);
       setErrorMessage(`Erreur Terminal : ${err.type}`);
       setConnectionStatus('DISCONNECTED');
     });
   };
 
   const handleJoinGame = () => {
-    const cleanCode = inputCode.trim().toLowerCase();
+    const cleanCode = inputCode.trim();
     if (!cleanCode) {
       setErrorMessage("Code session requis");
       return;
@@ -196,11 +205,13 @@ const App: React.FC = () => {
     peerRef.current = p;
 
     p.on('open', (myId) => {
+      setPeerId(myId);
+      console.log(`[UNITÉ] Tentative liaison vers MJ: ${cleanCode}`);
       const conn = p.connect(cleanCode, { reliable: true });
       
       const timeout = setTimeout(() => {
         if (connectionStatus !== 'CONNECTED') {
-          setErrorMessage("MJ Hors-ligne ou code invalide.");
+          setErrorMessage("MJ Hors-ligne ou code expiré.");
           setConnectionStatus('DISCONNECTED');
           p.destroy();
         }
@@ -208,49 +219,54 @@ const App: React.FC = () => {
 
       conn.on('open', () => {
         clearTimeout(timeout);
+        console.log("[UNITÉ] Canal ouvert, attente Handshake...");
         connectionsRef.current[cleanCode] = conn;
         setConnectionStatus('CONNECTED');
-        setPeerId(myId);
         
-        // On n'envoie pas le JOIN immédiatement, on attend le HANDSHAKE_OK ou on force après 1s
+        // Sécurité : si le handshake tarde, on envoie le JOIN de force après 1.5s
         setTimeout(() => {
-           if (connectionsRef.current[cleanCode]?.open) {
-              console.log("[UNITÉ] Envoi requête d'incorporation (JOIN)");
-              connectionsRef.current[cleanCode].send({ type: 'JOIN', payload: player, senderId: playerId });
-           }
-        }, 800);
+          if (connectionsRef.current[cleanCode]?.open) {
+            console.log("[UNITÉ] Envoi JOIN (Force)");
+            connectionsRef.current[cleanCode].send({ type: 'JOIN', payload: player, senderId: playerId });
+          }
+        }, 1500);
       });
 
       conn.on('data', (data: any) => {
         if (data.type === 'HANDSHAKE_OK' || data.type === 'SYNC_SESSION') {
-          console.log("[UNITÉ] Réception données tactiques");
-          setSession(data.payload || data);
-          // Si c'est un handshake, on peut renvoyer le JOIN par précaution
+          console.log(`[UNITÉ] Données reçues (${data.type})`);
+          if (data.payload) {
+            setSession(data.payload);
+          }
+          // Si le MJ confirme le handshake, on s'identifie immédiatement
           if (data.type === 'HANDSHAKE_OK') {
+             console.log("[UNITÉ] Handshake OK, envoi JOIN");
              conn.send({ type: 'JOIN', payload: player, senderId: playerId });
           }
         }
       });
 
       conn.on('error', (err) => {
+        console.error("[UNITÉ] Connexion Error:", err);
         setErrorMessage("Liaison interrompue.");
         setConnectionStatus('DISCONNECTED');
       });
 
       conn.on('close', () => {
+        console.log("[UNITÉ] Connexion fermée par le MJ");
         setConnectionStatus('DISCONNECTED');
         setErrorMessage("Déconnecté du Central.");
       });
     });
 
     p.on('error', (err) => {
+      console.error("[UNITÉ] PeerJS Global Error:", err);
       if (err.type === 'peer-not-found') setErrorMessage("Session introuvable.");
       else setErrorMessage(`Erreur liaison : ${err.type}`);
       setConnectionStatus('DISCONNECTED');
     });
   };
 
-  // Logique de jeu (Briefing, Timers, etc.)
   useEffect(() => {
     if (currentPlayer && session.status === GameStatus.ACTIVE && !briefing) {
       const p = session.players.find(pl => pl.id === currentPlayer.id);
@@ -290,13 +306,12 @@ const App: React.FC = () => {
     broadcastSession({ ...session, players, status: GameStatus.ACTIVE });
   };
 
-  // Vue LOBBY
   if (session.status === GameStatus.LOBBY) {
     return (
       <div className="flex flex-col h-full p-6 space-y-8 app-container justify-center">
         <div className="text-center">
             <h1 className="text-4xl font-bold tracking-tighter italic glow-neon mb-2 uppercase font-['Orbitron']">Opération Scellé</h1>
-            <p className="text-[10px] opacity-60 uppercase tracking-[0.5em] font-black text-[#F0FF00]">Réseau Tactique Sapeurs-Pompiers</p>
+            <p className="text-[10px] opacity-60 uppercase tracking-[0.5em] font-black text-[#F0FF00]">Système Tactique de Garde</p>
         </div>
         
         {errorMessage && (
@@ -306,12 +321,12 @@ const App: React.FC = () => {
         )}
 
         {connectionStatus !== 'CONNECTED' && !isHost ? (
-          <HUDFrame title="Initialisation Unité">
+          <HUDFrame title="Initialisation Terminal">
             <div className="space-y-4 py-4">
               <input 
                 value={inputName} onChange={e => setInputName(e.target.value)}
                 className="w-full bg-slate-900 border border-slate-700 p-4 text-[#F0FF00] placeholder:opacity-20 outline-none text-sm font-mono tracking-widest focus:border-[#F0FF00]" 
-                placeholder="VOTRE NOM DE CODE" 
+                placeholder="VOTRE IDENTIFIANT" 
               />
               <div className="grid grid-cols-2 gap-4 pt-2">
                 <button 
@@ -319,14 +334,14 @@ const App: React.FC = () => {
                     onClick={handleCreateGame} 
                     className="border-2 border-[#F0FF00] p-4 text-xs font-black uppercase tracking-widest hover:bg-[#F0FF00] hover:text-[#0A192F] transition-all disabled:opacity-30"
                 >
-                    POSTE CENTRAL
+                    POSTE MJ
                 </button>
                 <div className="flex flex-col space-y-2">
                    <input 
                     value={inputCode} 
                     onChange={e => setInputCode(e.target.value)}
                     className="bg-slate-900 border border-slate-700 p-2 text-[#F0FF00] placeholder:opacity-20 outline-none text-[10px] font-mono focus:border-[#F0FF00]" 
-                    placeholder="CODE SESSION" 
+                    placeholder="CODE MJ" 
                    />
                    <button 
                     disabled={connectionStatus === 'CONNECTING'}
@@ -340,27 +355,25 @@ const App: React.FC = () => {
             </div>
           </HUDFrame>
         ) : (
-          <HUDFrame title={isHost ? "Terminal Central (MJ)" : "Unité de Garde"}>
+          <HUDFrame title={isHost ? "Terminal Central (MJ)" : "Unité Mobile"}>
             <div className="space-y-4 py-4 text-center">
-              <div className="bg-slate-900/90 p-5 border border-slate-700 shadow-2xl relative overflow-hidden">
-                <div className="absolute top-0 left-0 w-1 h-full bg-[#F0FF00] opacity-50"></div>
-                <p className="text-[10px] opacity-40 uppercase mb-2 font-black tracking-widest text-left">Canal de Liaison Actif</p>
-                <p className="text-2xl font-mono font-black tracking-[0.2em] text-[#F0FF00] select-all">
-                    {session.code || peerId || "INIT..."}
+              <div className="bg-slate-900/90 p-5 border border-slate-700 shadow-2xl relative">
+                <p className="text-[10px] opacity-40 uppercase mb-2 font-black tracking-widest">Canal de Liaison P2P</p>
+                <p className="text-2xl font-mono font-black tracking-[0.2em] text-[#F0FF00] select-all break-all">
+                    {session.code || peerId || "..."}
                 </p>
-                <p className="text-[9px] mt-4 opacity-40 italic text-slate-400">Partagez ce code avec les autres pompiers de garde</p>
               </div>
               
               <div className="flex justify-between items-center px-1">
-                 <span className="text-[10px] text-slate-400 uppercase tracking-widest font-black">Effectif : {session.players.length} Unités</span>
+                 <span className="text-[10px] text-slate-400 uppercase tracking-widest font-black">Unités connectées : {session.players.length}</span>
                  <div className="flex space-x-1">
-                    {[...Array(session.players.length)].map((_,i) => <div key={i} className="w-1.5 h-3 bg-[#F0FF00] animate-pulse" style={{animationDelay: `${i*0.2}s`}}></div>)}
+                    {[...Array(session.players.length)].map((_,i) => <div key={i} className="w-1.5 h-3 bg-[#F0FF00] animate-pulse"></div>)}
                  </div>
               </div>
 
               <ul className="space-y-1 text-[11px] max-h-56 overflow-y-auto text-left font-mono border-t border-slate-800 pt-3">
                 {session.players.map(p => (
-                  <li key={p.id} className="flex justify-between items-center border-b border-slate-900/50 py-3 px-2 hover:bg-slate-800/30 transition-colors">
+                  <li key={p.id} className="flex justify-between items-center border-b border-slate-900/50 py-3 px-2 hover:bg-slate-800/20">
                     <span className={p.id === currentPlayer?.id ? "text-[#F0FF00] font-black" : "text-slate-400"}>
                         {p.id === currentPlayer?.id ? ">> " : "   "}{p.name}
                     </span>
@@ -375,14 +388,14 @@ const App: React.FC = () => {
                 <button 
                     onClick={handleStartGame} 
                     disabled={session.players.length < 2} 
-                    className="w-full mt-6 bg-[#F0FF00] text-[#0A192F] p-5 font-black tracking-[0.3em] text-sm uppercase disabled:opacity-20 shadow-[0_0_40px_rgba(240,255,0,0.2)] hover:scale-[1.02] transition-all active:scale-95"
+                    className="w-full mt-6 bg-[#F0FF00] text-[#0A192F] p-5 font-black tracking-[0.3em] text-sm uppercase disabled:opacity-20 shadow-[0_0_40px_rgba(240,255,0,0.2)] active:scale-95 transition-transform"
                 >
-                    DÉPLOYER LA GARDE
+                    INITIALISER LA GARDE
                 </button>
               ) : (
                 <div className="py-8 flex flex-col items-center">
-                    <div className="w-10 h-10 border-4 border-[#F0FF00] border-t-transparent rounded-full animate-spin mb-4 shadow-[0_0_15px_rgba(240,255,0,0.3)]"></div>
-                    <p className="text-[10px] uppercase tracking-[0.4em] text-blue-400 font-black animate-pulse">Liaison CODIS établie. Attente des ordres...</p>
+                    <div className="w-10 h-10 border-4 border-[#F0FF00] border-t-transparent rounded-full animate-spin mb-4"></div>
+                    <p className="text-[10px] uppercase tracking-[0.4em] text-blue-400 font-black animate-pulse">Liaison établie. En attente du MJ...</p>
                 </div>
               )}
             </div>
@@ -392,27 +405,26 @@ const App: React.FC = () => {
     );
   }
 
-  // VUE ACTIVE DU JEU (Infiltré / Garde / CODIS)
   const roleColor = currentPlayer?.role === Role.INFILTRÉ ? 'text-red-500' : 'text-[#F0FF00]';
 
   return (
     <div className="flex flex-col h-full app-container relative">
       <header className="h-14 border-b border-slate-800 flex items-center justify-between px-4 bg-slate-900/98 backdrop-blur-lg sticky top-0 z-50">
         <div className="flex items-center space-x-3">
-          <div className={`w-2.5 h-2.5 rounded-full ${connectionStatus === 'CONNECTED' ? 'bg-green-500 animate-pulse shadow-[0_0_12px_#22c55e]' : 'bg-red-500 shadow-[0_0_12px_#ef4444]'}`}></div>
+          <div className={`w-2.5 h-2.5 rounded-full ${connectionStatus === 'CONNECTED' ? 'bg-green-500 animate-pulse shadow-[0_0_12px_#22c55e]' : 'bg-red-500'}`}></div>
           <div className="flex flex-col"><span className="text-[8px] opacity-40 font-bold uppercase tracking-widest">Agent</span><span className="text-[10px] font-black">{currentPlayer?.name}</span></div>
         </div>
         <div className="flex flex-col items-center"><span className="text-[8px] opacity-40 font-bold uppercase tracking-widest">Secteur</span><span className="text-[10px] font-black text-[#F0FF00] font-mono">{session.code?.substring(0,8) || "---"}</span></div>
-        <div className="flex flex-col items-end"><span className="text-[8px] opacity-40 font-bold uppercase tracking-widest">Statut</span><span className="text-[10px] font-black uppercase text-blue-400">{session.status}</span></div>
+        <div className="flex flex-col items-end"><span className="text-[8px] opacity-40 font-bold uppercase tracking-widest">Phase</span><span className="text-[10px] font-black uppercase text-blue-400">{session.status}</span></div>
       </header>
 
       {session.status === GameStatus.BIP_ALERTE && (
         <div className="fixed inset-0 z-[100] bg-red-950/98 flex flex-col items-center justify-center p-8 text-center border-[10px] border-red-600 animate-pulse">
           <div className="scale-[2] mb-12">{RETICLE_ICON}</div>
-          <h2 className="text-6xl font-black text-white italic mb-6 glow-red uppercase tracking-tighter font-['Orbitron']">ALERTE BIP</h2>
-          <p className="text-sm text-red-200 tracking-[0.5em] uppercase mb-16 font-black">Interruption Opérationnelle Immédiate</p>
+          <h2 className="text-6xl font-black text-white italic mb-6 glow-red uppercase tracking-tighter">ALERTE BIP</h2>
+          <p className="text-sm text-red-200 tracking-[0.5em] uppercase mb-16 font-black">Interruption Opérationnelle</p>
           {isHost && (
-            <button onClick={() => sendToHost('BIP_RELEASE', null)} className="border-4 border-white text-white px-14 py-7 font-black text-xl hover:bg-white hover:text-red-900 transition-all shadow-[0_0_50px_rgba(255,255,255,0.3)] uppercase tracking-[0.3em] active:scale-90">
+            <button onClick={() => sendToHost('BIP_RELEASE', null)} className="border-4 border-white text-white px-14 py-7 font-black text-xl hover:bg-white hover:text-red-900 transition-all uppercase tracking-[0.3em] active:scale-90">
                 REPRENDRE
             </button>
           )}
@@ -421,49 +433,47 @@ const App: React.FC = () => {
 
       {showSuccessOverlay && (
         <div className="fixed inset-0 z-[200] bg-black/98 flex flex-col items-center justify-center text-center p-8 border-[15px] border-green-500 animate-neon-green">
-           <h2 className="text-7xl font-black text-green-400 italic mb-6 glow-green uppercase tracking-tighter font-['Orbitron']">SABOTAGE RÉUSSI</h2>
-           <p className="text-2xl font-black tracking-[0.6em] text-green-100 uppercase">Scellé Compromis</p>
+           <h2 className="text-7xl font-black text-green-400 italic mb-6 glow-green uppercase font-['Orbitron']">SABOTAGE RÉUSSI</h2>
+           <p className="text-2xl font-black tracking-[0.6em] text-green-100 uppercase">Scellé compromis</p>
         </div>
       )}
 
-      <main className="flex-1 overflow-y-auto p-4 space-y-6 pb-36">
+      <main className="flex-1 overflow-y-auto p-4 space-y-6 pb-40">
         {session.alertMsg && (
-          <div className="bg-red-950/50 border border-red-600 p-5 text-[10px] font-black uppercase text-red-500 animate-pulse flex items-center space-x-4 shadow-[0_0_20px_rgba(255,0,0,0.2)]">
+          <div className="bg-red-950/50 border border-red-600 p-5 text-[10px] font-black uppercase text-red-500 animate-pulse flex items-center space-x-4">
             <div className="w-5 h-5 bg-red-600 rounded-full animate-ping flex-shrink-0"></div>
             <span className="leading-relaxed tracking-widest">{session.alertMsg}</span>
           </div>
         )}
 
-        <HUDFrame title="Informations de Mission" variant={currentPlayer?.role === Role.INFILTRÉ ? 'alert' : 'neon'}>
+        <HUDFrame title="Données de Mission" variant={currentPlayer?.role === Role.INFILTRÉ ? 'alert' : 'neon'}>
           <div className="flex justify-between items-center mb-4">
             <h3 className={`text-4xl font-black italic tracking-tighter uppercase ${roleColor}`}>{currentPlayer?.role}</h3>
-            <div className="animate-spin duration-[15000ms] opacity-50">{RETICLE_ICON}</div>
+            <div className="animate-spin duration-[20000ms] opacity-50">{RETICLE_ICON}</div>
           </div>
           <div className="bg-slate-900/70 p-6 border-l-4 border-[#F0FF00] min-h-[100px] shadow-inner relative overflow-hidden">
-             <div className="absolute top-0 right-0 w-16 h-16 opacity-5 pointer-events-none scale-[3]">{RETICLE_ICON}</div>
-             <p className="text-[13px] font-mono leading-relaxed text-slate-100 italic whitespace-pre-wrap">{briefing || "Décryptage du dossier en cours... Connexion CODIS prioritaire."}</p>
+             <p className="text-[13px] font-mono leading-relaxed text-slate-100 italic whitespace-pre-wrap">{briefing || "Décryptage du dossier en cours..."}</p>
           </div>
         </HUDFrame>
 
-        {/* ACTIONS INFILTRÉ */}
         {currentPlayer?.role === Role.INFILTRÉ && (
           <div className="space-y-5">
             {session.sabotage.status === 'IDLE' && (
-               <button onClick={() => sendToHost('SABOTAGE_START', null)} className="w-full bg-red-600 text-white p-8 font-black uppercase tracking-[0.5em] text-sm shadow-[0_15px_40px_rgba(255,0,0,0.5)] active:translate-y-1 transition-all border-b-8 border-red-900">LANCER SABOTAGE</button>
+               <button onClick={() => sendToHost('SABOTAGE_START', null)} className="w-full bg-red-600 text-white p-8 font-black uppercase tracking-[0.5em] text-sm shadow-[0_15px_40px_rgba(255,0,0,0.5)] border-b-8 border-red-900 active:translate-y-1 transition-all">LANCER SABOTAGE</button>
             )}
             {session.sabotage.status === 'PENDING' && (
-               <HUDFrame title="Latence de Sécurité" variant="alert">
-                  <div className="text-8xl font-black text-center text-red-500 font-mono py-10 tracking-[0.2em] glow-red animate-pulse">
+               <HUDFrame title="Compte à rebours Latence" variant="alert">
+                  <div className="text-8xl font-black text-center text-red-500 font-mono py-10 tracking-[0.2em] glow-red">
                     {Math.floor(sabotageTimeLeft/1000/60)}:{Math.floor((sabotageTimeLeft/1000)%60).toString().padStart(2,'0')}
                   </div>
-                  <p className="text-[10px] text-center opacity-70 uppercase font-black tracking-[0.4em]">Approche furtive du scellé...</p>
+                  <p className="text-[10px] text-center opacity-70 uppercase font-black tracking-[0.4em]">Progression furtive...</p>
                </HUDFrame>
             )}
             {session.sabotage.status === 'READY_FOR_UPLOAD' && (
-              <HUDFrame title="Preuve de Neutralisation" variant="alert">
+              <HUDFrame title="Transmission Preuve" variant="alert">
                 <div className="space-y-5">
                   {!capturedPhoto ? (
-                    <div className="h-72 bg-slate-900/60 border-4 border-dashed border-red-600 flex flex-col items-center justify-center relative hover:bg-red-900/20 transition-colors group">
+                    <div className="h-72 bg-slate-900/60 border-4 border-dashed border-red-600 flex flex-col items-center justify-center relative hover:bg-red-900/20 transition-colors">
                       <input type="file" accept="image/*" capture="environment" onChange={(e) => {
                          const file = e.target.files?.[0];
                          if (file) {
@@ -473,16 +483,14 @@ const App: React.FC = () => {
                          }
                       }} className="opacity-0 absolute inset-0 w-full h-full cursor-pointer z-10" />
                       <div className="text-center p-6">
-                        <div className="text-red-600 mb-6 flex justify-center scale-[2.5] group-hover:scale-[3] transition-transform">{RETICLE_ICON}</div>
-                        <p className="text-[13px] font-black text-red-400 uppercase tracking-[0.3em]">Scanner l'objet scellé</p>
+                        <div className="text-red-600 mb-6 flex justify-center scale-[2.5]">{RETICLE_ICON}</div>
+                        <p className="text-[13px] font-black text-red-400 uppercase tracking-[0.3em]">Scanner le scellé neutralisé</p>
                       </div>
                     </div>
                   ) : (
-                    <div className="relative aspect-square border-4 border-green-500 shadow-2xl bg-black overflow-hidden">
+                    <div className="relative aspect-square border-4 border-green-500 bg-black overflow-hidden">
                        <img src={capturedPhoto} className="w-full h-full object-contain" alt="Scan" />
-                       <div className="absolute inset-0 bg-green-500/20 animate-pulse pointer-events-none"></div>
-                       <div className="absolute top-0 left-0 w-full h-1 bg-green-500 animate-scanline pointer-events-none"></div>
-                       <button onClick={() => setCapturedPhoto(null)} className="absolute top-5 right-5 bg-red-600 px-5 py-2 text-[11px] font-black uppercase shadow-2xl border-b-4 border-red-900">ÉCHEC SCAN</button>
+                       <button onClick={() => setCapturedPhoto(null)} className="absolute top-5 right-5 bg-red-600 px-5 py-2 text-[11px] font-black uppercase border-b-4 border-red-900">ANNULER</button>
                     </div>
                   )}
                   <button onClick={() => {
@@ -490,65 +498,60 @@ const App: React.FC = () => {
                      setTimeout(() => setShowSuccessOverlay(false), 3000);
                      sendToHost('SABOTAGE_COMPLETE', capturedPhoto);
                      setCapturedPhoto(null);
-                  }} disabled={!capturedPhoto} className="w-full bg-red-600 text-white p-7 font-black uppercase tracking-[0.3em] text-sm disabled:opacity-30 transition-all shadow-[0_15px_30px_rgba(255,0,0,0.4)] border-b-8 border-red-900">TRANSMETTRE AU RÉSEAU</button>
+                  }} disabled={!capturedPhoto} className="w-full bg-red-600 text-white p-7 font-black uppercase tracking-[0.3em] text-sm disabled:opacity-30 border-b-8 border-red-900">VALIDER NEUTRALISATION</button>
                 </div>
               </HUDFrame>
             )}
           </div>
         )}
 
-        {/* ACTIONS GARDE */}
         {currentPlayer?.role !== Role.MJ && currentPlayer?.role !== Role.INFILTRÉ && (
-           <HUDFrame title="Poste de Surveillance" variant={session.sabotage.isActive ? 'alert' : 'muted'}>
+           <HUDFrame title="Surveillance" variant={session.sabotage.isActive ? 'alert' : 'muted'}>
               <button 
                 onClick={() => sendToHost('SABOTAGE_REPORT', null)} 
                 disabled={!session.sabotage.isActive}
-                className={`w-full p-8 font-black uppercase tracking-[0.4em] text-[11px] border-4 transition-all ${session.sabotage.isActive ? 'border-red-600 text-red-500 animate-pulse bg-red-950/40 shadow-[0_0_30px_rgba(255,0,0,0.3)]' : 'border-slate-800 text-slate-700 opacity-60'}`}
+                className={`w-full p-8 font-black uppercase tracking-[0.4em] text-[11px] border-4 transition-all ${session.sabotage.isActive ? 'border-red-600 text-red-500 animate-pulse bg-red-950/40' : 'border-slate-800 text-slate-700 opacity-60'}`}
               >
-                {session.sabotage.isActive ? "SABOTAGE DÉTECTÉ ! SIGNALER" : "ZÉRO ACTIVITÉ SUSPECTE"}
+                {session.sabotage.isActive ? "DÉTECTION ANOMALIE ! SIGNALER" : "ZÉRO MENACE"}
               </button>
            </HUDFrame>
         )}
 
-        {/* ACTIONS CODIS */}
         {currentPlayer?.role === Role.CODIS && (
-           <HUDFrame title="Base de Renseignement">
+           <HUDFrame title="Base de Données CODIS">
              {!session.codisCheckUsed ? (
                <div className="space-y-5">
-                 <div className="relative">
-                    <select id="codis-sel" className="w-full bg-slate-900 border-2 border-slate-700 p-5 text-[14px] text-[#F0FF00] font-mono outline-none appearance-none focus:border-[#F0FF00] shadow-inner">
-                      <option value="">-- CHOISIR UNE UNITÉ --</option>
-                      {session.players.filter(p => p.id !== currentPlayer.id && p.role !== Role.MJ).map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
-                    </select>
-                    <div className="absolute right-5 top-1/2 -translate-y-1/2 pointer-events-none text-slate-500 scale-125">▼</div>
-                 </div>
+                 <select id="codis-sel" className="w-full bg-slate-900 border-2 border-slate-700 p-5 text-[14px] text-[#F0FF00] font-mono outline-none appearance-none focus:border-[#F0FF00]">
+                    <option value="">-- CHOISIR UNE CIBLE --</option>
+                    {session.players.filter(p => p.id !== currentPlayer.id && p.role !== Role.MJ).map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+                 </select>
                  <button onClick={async () => {
                    const tid = (document.getElementById('codis-sel') as HTMLSelectElement).value;
                    if(!tid) return;
                    const target = session.players.find(p => p.id === tid);
                    if(!target) return;
                    const report = await analyzeIntel(currentPlayer.name, target.name);
-                   setIntelReport(`AGENT : ${target.name}\nANALYSES : ${report}\nCONCLUSION : ${target.role === Role.INFILTRÉ ? 'HOSTILE' : 'ALLIÉ'}`);
+                   setIntelReport(`RÉSUMÉ : ${target.name}\nANALYSES : ${report}\nCONCLUSION : ${target.role === Role.INFILTRÉ ? 'HOSTILE' : 'ALLIÉ'}`);
                    if (isHost) broadcastSession({ ...session, codisCheckUsed: true });
                    else sendToHost('CODIS_USE', null);
-                 }} className="w-full bg-blue-700 text-white p-6 font-black text-xs tracking-[0.3em] uppercase shadow-2xl hover:bg-blue-600 active:scale-95 transition-all border-b-8 border-blue-900">ANALYSE BIOMÉTRIQUE</button>
+                 }} className="w-full bg-blue-700 text-white p-6 font-black text-xs tracking-[0.3em] uppercase border-b-8 border-blue-900 active:translate-y-1 transition-all">LANCER INVESTIGATION BIOMÉTRIQUE</button>
                </div>
              ) : (
-               <div className="bg-blue-900/40 p-6 border-l-4 border-blue-500 font-mono text-[12px] text-blue-100 leading-relaxed italic shadow-inner">
-                 {intelReport || "SESSIONS ÉPUISÉES. CANAL VERROUILLÉ."}
+               <div className="bg-blue-900/40 p-6 border-l-4 border-blue-500 font-mono text-[12px] text-blue-100 leading-relaxed italic">
+                 {intelReport || "CANAL CODIS FERMÉ."}
                </div>
              )}
            </HUDFrame>
         )}
       </main>
 
-      <footer className="fixed bottom-0 left-0 right-0 p-5 bg-[#0A192F]/98 backdrop-blur-3xl border-t-2 border-slate-800 z-[90] shadow-[0_-15px_50px_rgba(0,0,0,0.6)]">
+      <footer className="fixed bottom-0 left-0 right-0 p-5 bg-[#0A192F]/98 backdrop-blur-3xl border-t-2 border-slate-800 z-[90]">
         <button 
           onClick={() => sendToHost(session.status === GameStatus.BIP_ALERTE ? 'BIP_RELEASE' : 'BIP_TRIGGER', null)}
-          className="w-full h-28 bg-red-600 rounded-2xl flex flex-col items-center justify-center shadow-[0_-10px_50px_rgba(255,0,0,0.6)] active:scale-95 transition-all border-b-[12px] border-red-900 active:border-b-0 hover:brightness-110"
+          className="w-full h-28 bg-red-600 rounded-2xl flex flex-col items-center justify-center shadow-[0_-10px_50px_rgba(255,0,0,0.6)] active:scale-95 transition-all border-b-[12px] border-red-900 active:border-b-0"
         >
           <span className="text-4xl font-black text-white glow-red italic tracking-tighter uppercase mb-1 font-['Orbitron']">ALERTE BIP</span>
-          <span className="text-[11px] text-red-100 font-black uppercase tracking-[0.6em] opacity-90 animate-pulse">Urgence Opérationnelle</span>
+          <span className="text-[11px] text-red-100 font-black uppercase tracking-[0.6em] opacity-90">Interruption Immédiate</span>
         </button>
       </footer>
     </div>
