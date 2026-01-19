@@ -39,8 +39,18 @@ const App: React.FC = () => {
   const [briefing, setBriefing] = useState<string>('');
   const [intelReport, setIntelReport] = useState<string | null>(null);
   const [capturedPhoto, setCapturedPhoto] = useState<string | null>(null);
+  const [isUploading, setIsUploading] = useState(false); // Nouvel état pour gérer l'upload
   const [sabotageTimeLeft, setSabotageTimeLeft] = useState<number>(SABOTAGE_TIMER_MS);
   const [showSuccessOverlay, setShowSuccessOverlay] = useState(false);
+
+  // --- GESTION ÉTAT LOCAL PHOTO ---
+  // On ne reset la photo locale que si le statut global change vraiment, pour éviter le "flicker" sur mobile
+  useEffect(() => {
+    if (session.sabotage.status === 'PENDING' && capturedPhoto) {
+        setCapturedPhoto(null);
+        setIsUploading(false);
+    }
+  }, [session.sabotage.status]);
 
   // --- SYNCHRONISATION CRITIQUE DU RÔLE ---
   useEffect(() => {
@@ -89,6 +99,7 @@ const App: React.FC = () => {
         });
         break;
       case 'SABOTAGE_CONFIRM':
+        // On passe en PENDING immédiatement
         broadcastSession({
           ...current,
           sabotage: { 
@@ -107,7 +118,6 @@ const App: React.FC = () => {
           alertMsg: "SABOTAGE DÉJOUÉ PAR LA GARDE !"
         });
         setTimeout(() => {
-            // Reset automatique pour permettre un nouveau sabotage
             broadcastSession({ 
               ...sessionRef.current, 
               alertMsg: undefined,
@@ -128,7 +138,6 @@ const App: React.FC = () => {
           alertMsg: "SCELLÉ COMPROMIS - ZONE ROUGE"
         });
         setTimeout(() => {
-             // Reset automatique après succès pour permettre la suite
              broadcastSession({ 
                 ...sessionRef.current, 
                 alertMsg: undefined,
@@ -146,6 +155,7 @@ const App: React.FC = () => {
         broadcastSession({
             ...current,
             status: GameStatus.VOTING,
+            votes: {}, // Reset des votes précédents
             alertMsg: "CONSEIL DISCIPLINAIRE - VOTE REQUIS"
         });
         break;
@@ -154,7 +164,22 @@ const App: React.FC = () => {
         broadcastSession({ ...current, votes: newVotes });
         break;
       case 'REVEAL_RESULTS':
-        broadcastSession({ ...current, status: GameStatus.FINISHED, alertMsg: undefined });
+        // On passe à l'écran de résultats au lieu de finir directement
+        broadcastSession({ ...current, status: GameStatus.VOTE_RESULTS, alertMsg: undefined });
+        break;
+      case 'RESUME_MISSION':
+        broadcastSession({ 
+            ...current, 
+            status: GameStatus.ACTIVE, 
+            votes: {},
+            alertMsg: "REPRISE DES OPÉRATIONS" 
+        });
+        setTimeout(() => {
+            broadcastSession({ ...sessionRef.current, alertMsg: undefined });
+        }, 3000);
+        break;
+      case 'END_GAME':
+        broadcastSession({ ...current, status: GameStatus.FINISHED });
         break;
       case 'BIP_TRIGGER':
         broadcastSession({ ...current, status: GameStatus.BIP_ALERTE });
@@ -183,21 +208,16 @@ const App: React.FC = () => {
   };
 
   const initHostPeer = (attempt = 1) => {
-    // Génère un code à 4 chiffres (1000-9999)
     const shortCode = Math.floor(1000 + Math.random() * 9000).toString();
     const fullId = PEER_PREFIX + shortCode;
-    
     console.log(`[MJ] Tentative init avec ID: ${fullId} (Essai ${attempt})`);
-    
     const p = new Peer(fullId);
     peerRef.current = p;
 
     p.on('open', (id) => {
-      // On n'affiche que le code court à l'utilisateur
       setPeerId(shortCode);
       setConnectionStatus('CONNECTED');
       setSession(prev => ({ ...prev, code: shortCode }));
-      console.log("[MJ] SERVEUR ACTIF - Code Public:", shortCode);
     });
 
     p.on('connection', (conn) => {
@@ -215,9 +235,7 @@ const App: React.FC = () => {
 
     p.on('error', (err: any) => {
       if (err.type === 'unavailable-id') {
-        console.warn(`[MJ] ID ${shortCode} indisponible, nouvel essai...`);
         p.destroy();
-        // Récursion avec un nouveau code
         if (attempt < 10) initHostPeer(attempt + 1);
         else setErrorMessage("Impossible de créer un canal (Réseau saturé).");
       } else {
@@ -231,11 +249,9 @@ const App: React.FC = () => {
     setErrorMessage(null);
     setIsHost(true);
     setConnectionStatus('CONNECTING');
-    
     const adminId = 'mj-' + Math.random().toString(36).substr(2, 4);
     const admin: Player = { id: adminId, name: inputName || 'CENTRAL_MJ', role: Role.MJ, isNeutralised: false };
     setCurrentPlayer(admin);
-    
     const initialSession: GameSession = {
       code: '',
       players: [admin],
@@ -245,27 +261,21 @@ const App: React.FC = () => {
       votes: {}
     };
     setSession(initialSession);
-
     initHostPeer();
   };
 
   const handleJoinGame = () => {
     const cleanCode = inputCode.trim();
     if (cleanCode.length !== 4) { setErrorMessage("Code 4 chiffres requis"); return; }
-    
     setErrorMessage(null); setIsHost(false); setConnectionStatus('CONNECTING');
-
     const playerId = 'unit-' + Math.random().toString(36).substr(2, 4);
     const player: Player = { id: playerId, name: inputName || 'UNITÉ', role: Role.GARDE, isNeutralised: false };
     setCurrentPlayer(player);
-    
-    const p = new Peer(); // L'ID du client peut rester aléatoire
+    const p = new Peer();
     peerRef.current = p;
 
     p.on('open', (myId) => {
       const targetFullId = PEER_PREFIX + cleanCode;
-      console.log(`[CLIENT] Connexion vers ${targetFullId}`);
-      
       const conn = p.connect(targetFullId, { reliable: true });
       const timeout = setTimeout(() => {
         if (connectionStatus !== 'CONNECTED') {
@@ -277,7 +287,7 @@ const App: React.FC = () => {
         clearTimeout(timeout);
         connectionsRef.current[targetFullId] = conn;
         setConnectionStatus('CONNECTED');
-        setPeerId(cleanCode); // Pour affichage
+        setPeerId(cleanCode);
         setSession(prev => ({ ...prev, code: cleanCode }));
         conn.send({ type: 'JOIN', payload: player, senderId: playerId });
       });
@@ -466,21 +476,23 @@ const App: React.FC = () => {
                           ))}
                         </ul>
                     </div>
+                    
+                    {/* BOUTON CONSEIL TOUJOURS DISPONIBLE */}
+                    <div className="pt-4 border-t border-slate-700">
+                         <button onClick={() => sendToHost('START_VOTE', null)} className="w-full bg-[#F0FF00] text-[#0A192F] p-4 font-black uppercase tracking-[0.2em] shadow-lg hover:bg-white transition-all">
+                            CONVOQUER LE CONSEIL
+                         </button>
+                    </div>
 
                     {(session.sabotage.status === 'COMPLETED' || session.sabotage.status === 'DEJOUÉ') && (
-                        <div className="space-y-4 pt-4 border-t border-slate-700">
-                             <div className={`p-4 border-l-4 ${session.sabotage.status === 'COMPLETED' ? 'border-red-500 bg-red-950/20' : 'border-green-500 bg-green-950/20'}`}>
-                                <p className="text-[10px] uppercase tracking-widest opacity-70 mb-1">Rapport de Mission</p>
-                                <p className="text-lg font-black uppercase">{session.sabotage.status === 'COMPLETED' ? "SCELLE COMPROMIS" : "MENACE NEUTRALISÉE"}</p>
-                             </div>
-                             <button onClick={() => sendToHost('START_VOTE', null)} className="w-full bg-[#F0FF00] text-[#0A192F] p-4 font-black uppercase tracking-[0.2em] shadow-lg hover:bg-white transition-all">
-                                CONVOQUER LE CONSEIL
-                             </button>
+                        <div className={`p-4 border-l-4 mt-4 ${session.sabotage.status === 'COMPLETED' ? 'border-red-500 bg-red-950/20' : 'border-green-500 bg-green-950/20'}`}>
+                           <p className="text-[10px] uppercase tracking-widest opacity-70 mb-1">Rapport de Mission</p>
+                           <p className="text-lg font-black uppercase">{session.sabotage.status === 'COMPLETED' ? "SCELLE COMPROMIS" : "MENACE NEUTRALISÉE"}</p>
                         </div>
                     )}
                     
                     {session.sabotage.status === 'PENDING' && (
-                        <div className="bg-red-950/30 p-4 border border-red-900/50 animate-pulse">
+                        <div className="bg-red-950/30 p-4 border border-red-900/50 animate-pulse mt-4">
                             <p className="text-[10px] text-red-400 uppercase tracking-widest mb-1">Sabotage en cours</p>
                             <p className="text-3xl font-black text-red-500 font-mono">
                                 {Math.floor(sabotageTimeLeft/1000/60)}:{Math.floor((sabotageTimeLeft/1000)%60).toString().padStart(2,'0')}
@@ -514,10 +526,20 @@ const App: React.FC = () => {
                       ) : (
                         <div className="relative aspect-square border-4 border-green-500 bg-black overflow-hidden shadow-2xl">
                           <img src={capturedPhoto} className="w-full h-full object-contain" alt="Scan" />
-                          <button onClick={() => setCapturedPhoto(null)} className="absolute top-5 right-5 bg-red-600 px-5 py-2 text-[11px] font-black uppercase border-b-4 border-red-900">RE-SCANNER</button>
+                          <button onClick={() => setCapturedPhoto(null)} disabled={isUploading} className="absolute top-5 right-5 bg-red-600 px-5 py-2 text-[11px] font-black uppercase border-b-4 border-red-900">RE-SCANNER</button>
                         </div>
                       )}
-                      <button onClick={() => { sendToHost('SABOTAGE_CONFIRM', capturedPhoto); setCapturedPhoto(null); }} disabled={!capturedPhoto} className="w-full bg-red-600 text-white p-7 font-black uppercase tracking-[0.3em] text-sm disabled:opacity-30 border-b-8 border-red-900 shadow-xl">VALIDER LE SABOTAGE</button>
+                      <button 
+                        onClick={() => { 
+                            setIsUploading(true);
+                            sendToHost('SABOTAGE_CONFIRM', capturedPhoto); 
+                            // Note: On ne setCapturedPhoto(null) PAS ici, on attend le changement de statut global
+                        }} 
+                        disabled={!capturedPhoto || isUploading} 
+                        className="w-full bg-red-600 text-white p-7 font-black uppercase tracking-[0.3em] text-sm disabled:opacity-30 border-b-8 border-red-900 shadow-xl"
+                      >
+                        {isUploading ? "TRANSMISSION..." : "VALIDER LE SABOTAGE"}
+                      </button>
                     </div>
                   </HUDFrame>
                 )}
@@ -614,12 +636,49 @@ const App: React.FC = () => {
                             onClick={() => sendToHost('REVEAL_RESULTS', null)}
                             className="w-full bg-red-600 text-white p-4 font-black uppercase tracking-widest mt-4 hover:bg-red-500"
                         >
-                            CLÔTURER ET RÉVÉLER
+                            RÉVÉLER LES VOTES
                         </button>
                      </div>
                  )}
              </div>
           </HUDFrame>
+        )}
+
+        {/* --- RÉSULTATS DES VOTES (Intermédiaire) --- */}
+        {session.status === GameStatus.VOTE_RESULTS && (
+           <HUDFrame title="RÉSULTATS DU VOTE" variant="alert">
+               <div className="space-y-6 text-center">
+                   <h3 className="text-xl font-black text-red-500 uppercase mb-4">Dépouillement</h3>
+                   <div className="grid grid-cols-1 gap-2">
+                       {session.players.filter(p => p.role !== Role.MJ).map(p => {
+                           // Calculer qui a voté pour ce joueur
+                           const votesForMe = Object.entries(session.votes).filter(([_, targetId]) => targetId === p.id).length;
+                           return (
+                               <div key={p.id} className="bg-slate-900/50 p-3 border border-slate-700 flex justify-between items-center">
+                                   <span className="text-sm font-bold">{p.name}</span>
+                                   <div className="flex space-x-1">
+                                       {[...Array(votesForMe)].map((_, i) => (
+                                           <div key={i} className="w-3 h-3 bg-red-500 rounded-full shadow-[0_0_8px_red]"></div>
+                                       ))}
+                                   </div>
+                               </div>
+                           )
+                       })}
+                   </div>
+                   
+                   {isHost && (
+                       <div className="grid grid-cols-1 gap-4 mt-6">
+                            <button onClick={() => sendToHost('RESUME_MISSION', null)} className="border-2 border-[#F0FF00] text-[#F0FF00] p-4 font-black uppercase tracking-widest hover:bg-[#F0FF00] hover:text-black transition-all">
+                                REPRENDRE LA MISSION
+                            </button>
+                            <button onClick={() => sendToHost('END_GAME', null)} className="bg-red-900/50 text-red-400 p-4 font-black uppercase tracking-widest text-[10px] hover:text-white">
+                                TERMINER LA PARTIE
+                            </button>
+                       </div>
+                   )}
+                   {!isHost && <p className="text-[10px] animate-pulse text-slate-500 uppercase mt-4">En attente de la décision du MJ...</p>}
+               </div>
+           </HUDFrame>
         )}
 
         {/* --- ÉCRAN DE FIN --- */}

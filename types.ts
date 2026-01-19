@@ -11,6 +11,7 @@ export enum GameStatus {
   ACTIVE = 'ACTIVE',
   BIP_ALERTE = 'BIP_ALERTE',
   VOTING = 'VOTING',
+  VOTE_RESULTS = 'VOTE_RESULTS',
   FINISHED = 'FINISHED'
 }
 
