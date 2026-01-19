@@ -2,7 +2,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import Peer, { DataConnection } from 'peerjs';
 import { Role, GameStatus, Player, GameSession } from './types.ts';
-import { RETICLE_ICON, CHRONOGRAM_TIMES } from './constants.tsx';
+import { RETICLE_ICON, CHRONOGRAM_TIMES, DOSSIER_ICON } from './constants.tsx';
 import HUDFrame from './components/HUDFrame.tsx';
 import { generateBriefing, analyzeIntel } from './services/geminiService.ts';
 
@@ -39,6 +39,22 @@ const App: React.FC = () => {
   const [capturedPhoto, setCapturedPhoto] = useState<string | null>(null);
   const [sabotageTimeLeft, setSabotageTimeLeft] = useState<number>(SABOTAGE_TIMER_MS);
   const [showSuccessOverlay, setShowSuccessOverlay] = useState(false);
+
+  // --- SYNCHRONISATION CRITIQUE DU RÔLE ---
+  // Met à jour le joueur local quand la session change (ex: début de partie, attribution des rôles)
+  useEffect(() => {
+    if (session.status === GameStatus.ACTIVE && currentPlayer) {
+       const syncedPlayer = session.players.find(p => p.id === currentPlayer.id);
+       // On vérifie si le rôle a changé pour éviter les boucles infinies, mais on met à jour si nécessaire
+       if (syncedPlayer && syncedPlayer.role !== currentPlayer.role) {
+           console.log(`[SYS] RÔLE MIS À JOUR : ${currentPlayer.role} -> ${syncedPlayer.role}`);
+           setCurrentPlayer(syncedPlayer);
+           // Reset briefing pour forcer la régénération avec le nouveau rôle
+           setBriefing(''); 
+       }
+    }
+  }, [session.players, session.status, currentPlayer?.id]);
+  // ----------------------------------------
 
   // Fonction de diffusion (Host uniquement)
   const broadcastSession = (newSession: GameSession) => {
@@ -237,7 +253,7 @@ const App: React.FC = () => {
       const p = session.players.find(pl => pl.id === currentPlayer.id);
       if (p) generateBriefing(p.role, p.name).then(setBriefing);
     }
-  }, [session.status, currentPlayer]);
+  }, [session.status, currentPlayer?.role]); // Changé dépendance pour régénérer si le rôle change
 
   useEffect(() => {
     if (session.sabotage.isActive && session.sabotage.startTime && session.sabotage.status === 'PENDING') {
@@ -264,9 +280,14 @@ const App: React.FC = () => {
     }
     const rolesPool = [Role.INFILTRÉ, Role.CODIS];
     while (rolesPool.length < nonAdmin.length) rolesPool.push(Role.GARDE);
+    // Mélange de Fisher-Yates pour plus d'aléatoire
+    for (let i = rolesPool.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [rolesPool[i], rolesPool[j]] = [rolesPool[j], rolesPool[i]];
+    }
+    
     nonAdmin.forEach(p => {
-      const idx = Math.floor(Math.random() * rolesPool.length);
-      p.role = rolesPool.splice(idx, 1)[0];
+      p.role = rolesPool.pop() || Role.GARDE;
     });
     broadcastSession({ ...session, players, status: GameStatus.ACTIVE });
   };
@@ -421,6 +442,44 @@ const App: React.FC = () => {
           </div>
         </HUDFrame>
 
+        {/* --- INTERFACE MJ (SUPERVISION) --- */}
+        {currentPlayer?.role === Role.MJ && (
+           <HUDFrame title="Supervision Tactique" variant="neon">
+              <div className="space-y-4">
+                 <div className="bg-slate-900/50 p-4 border border-slate-700">
+                    <h4 className="text-[10px] uppercase tracking-widest text-slate-400 mb-3 border-b border-slate-800 pb-1">État des Agents</h4>
+                    <ul className="space-y-2">
+                      {session.players.filter(p => p.role !== Role.MJ).map(p => (
+                        <li key={p.id} className="flex justify-between items-center text-[11px] font-mono">
+                           <span className="text-white">{p.name}</span>
+                           <span className={`font-black uppercase ${p.role === Role.INFILTRÉ ? 'text-red-500' : p.role === Role.CODIS ? 'text-blue-400' : 'text-slate-500'}`}>
+                             {p.role}
+                           </span>
+                        </li>
+                      ))}
+                    </ul>
+                 </div>
+
+                 {session.sabotage.isActive && (
+                    <div className="bg-red-950/30 p-4 border border-red-900/50 animate-pulse">
+                        <p className="text-[10px] text-red-400 uppercase tracking-widest mb-1">Sabotage en cours</p>
+                        <p className="text-3xl font-black text-red-500 font-mono">
+                            {Math.floor(sabotageTimeLeft/1000/60)}:{Math.floor((sabotageTimeLeft/1000)%60).toString().padStart(2,'0')}
+                        </p>
+                    </div>
+                 )}
+
+                 {session.sabotage.status === 'COMPLETED' && session.sabotage.photoUri && (
+                     <div className="space-y-2">
+                        <p className="text-[10px] text-green-400 uppercase tracking-widest">Preuve de sabotage reçue</p>
+                        <img src={session.sabotage.photoUri} className="w-full border-2 border-green-500" alt="Preuve" />
+                     </div>
+                 )}
+              </div>
+           </HUDFrame>
+        )}
+
+        {/* --- INTERFACE INFILTRÉ --- */}
         {currentPlayer?.role === Role.INFILTRÉ && (
           <div className="space-y-5">
             {session.sabotage.status === 'IDLE' && (
@@ -470,6 +529,7 @@ const App: React.FC = () => {
           </div>
         )}
 
+        {/* --- INTERFACE GARDE (Tout le monde sauf MJ et Infiltré) --- */}
         {currentPlayer?.role !== Role.MJ && currentPlayer?.role !== Role.INFILTRÉ && (
            <HUDFrame title="Module de Garde" variant={session.sabotage.isActive ? 'alert' : 'muted'}>
               <button 
@@ -482,6 +542,7 @@ const App: React.FC = () => {
            </HUDFrame>
         )}
 
+        {/* --- INTERFACE CODIS --- */}
         {currentPlayer?.role === Role.CODIS && (
            <HUDFrame title="Terminal Renseignement">
              {!session.codisCheckUsed ? (
