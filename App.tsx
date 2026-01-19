@@ -7,6 +7,7 @@ import HUDFrame from './components/HUDFrame.tsx';
 import { generateBriefing, analyzeIntel } from './services/geminiService.ts';
 
 const SABOTAGE_TIMER_MS = 10 * 60 * 1000;
+const PEER_PREFIX = 'OP-SCELLE-';
 
 const App: React.FC = () => {
   const [inputName, setInputName] = useState('');
@@ -156,6 +157,51 @@ const App: React.FC = () => {
     }
   };
 
+  const initHostPeer = (attempt = 1) => {
+    // Génère un code à 4 chiffres (1000-9999)
+    const shortCode = Math.floor(1000 + Math.random() * 9000).toString();
+    const fullId = PEER_PREFIX + shortCode;
+    
+    console.log(`[MJ] Tentative init avec ID: ${fullId} (Essai ${attempt})`);
+    
+    const p = new Peer(fullId);
+    peerRef.current = p;
+
+    p.on('open', (id) => {
+      // On n'affiche que le code court à l'utilisateur
+      setPeerId(shortCode);
+      setConnectionStatus('CONNECTED');
+      setSession(prev => ({ ...prev, code: shortCode }));
+      console.log("[MJ] SERVEUR ACTIF - Code Public:", shortCode);
+    });
+
+    p.on('connection', (conn) => {
+      connectionsRef.current[conn.peer] = conn;
+      conn.on('open', () => {
+        conn.send({ type: 'HANDSHAKE_OK', payload: sessionRef.current });
+      });
+      conn.on('data', (data: any) => {
+        if (data && data.type) actionRef.current(data.senderId || conn.peer, data);
+      });
+      conn.on('close', () => {
+        delete connectionsRef.current[conn.peer];
+      });
+    });
+
+    p.on('error', (err: any) => {
+      if (err.type === 'unavailable-id') {
+        console.warn(`[MJ] ID ${shortCode} indisponible, nouvel essai...`);
+        p.destroy();
+        // Récursion avec un nouveau code
+        if (attempt < 10) initHostPeer(attempt + 1);
+        else setErrorMessage("Impossible de créer un canal (Réseau saturé).");
+      } else {
+        setErrorMessage(`Erreur Terminal : ${err.type}`);
+        setConnectionStatus('DISCONNECTED');
+      }
+    });
+  };
+
   const handleCreateGame = () => {
     setErrorMessage(null);
     setIsHost(true);
@@ -175,60 +221,39 @@ const App: React.FC = () => {
     };
     setSession(initialSession);
 
-    const p = new Peer();
-    peerRef.current = p;
-
-    p.on('open', (id) => {
-      setPeerId(id);
-      setConnectionStatus('CONNECTED');
-      setSession(prev => ({ ...prev, code: id }));
-      console.log("[MJ] SERVEUR ACTIF - ID:", id);
-    });
-
-    p.on('connection', (conn) => {
-      connectionsRef.current[conn.peer] = conn;
-      conn.on('open', () => {
-        conn.send({ type: 'HANDSHAKE_OK', payload: sessionRef.current });
-      });
-      conn.on('data', (data: any) => {
-        if (data && data.type) actionRef.current(data.senderId || conn.peer, data);
-      });
-      conn.on('close', () => {
-        delete connectionsRef.current[conn.peer];
-      });
-    });
-
-    p.on('error', (err) => {
-      setErrorMessage(`Erreur Terminal : ${err.type}`);
-      setConnectionStatus('DISCONNECTED');
-    });
+    initHostPeer();
   };
 
   const handleJoinGame = () => {
     const cleanCode = inputCode.trim();
-    if (!cleanCode) { setErrorMessage("Code MJ requis"); return; }
+    if (cleanCode.length !== 4) { setErrorMessage("Code 4 chiffres requis"); return; }
+    
     setErrorMessage(null); setIsHost(false); setConnectionStatus('CONNECTING');
 
     const playerId = 'unit-' + Math.random().toString(36).substr(2, 4);
     const player: Player = { id: playerId, name: inputName || 'UNITÉ', role: Role.GARDE, isNeutralised: false };
     setCurrentPlayer(player);
     
-    const p = new Peer();
+    const p = new Peer(); // L'ID du client peut rester aléatoire
     peerRef.current = p;
 
     p.on('open', (myId) => {
-      setPeerId(myId);
-      const conn = p.connect(cleanCode, { reliable: true });
+      const targetFullId = PEER_PREFIX + cleanCode;
+      console.log(`[CLIENT] Connexion vers ${targetFullId}`);
+      
+      const conn = p.connect(targetFullId, { reliable: true });
       const timeout = setTimeout(() => {
         if (connectionStatus !== 'CONNECTED') {
-          setErrorMessage("Échec liaison MJ."); setConnectionStatus('DISCONNECTED'); p.destroy();
+          setErrorMessage("Échec liaison MJ (Code invalide ?)."); setConnectionStatus('DISCONNECTED'); p.destroy();
         }
       }, 8000);
 
       conn.on('open', () => {
         clearTimeout(timeout);
-        connectionsRef.current[cleanCode] = conn;
+        connectionsRef.current[targetFullId] = conn;
         setConnectionStatus('CONNECTED');
+        setPeerId(cleanCode); // Pour affichage
+        setSession(prev => ({ ...prev, code: cleanCode }));
         conn.send({ type: 'JOIN', payload: player, senderId: playerId });
       });
 
@@ -304,7 +329,13 @@ const App: React.FC = () => {
               <div className="grid grid-cols-2 gap-4 pt-2">
                 <button disabled={connectionStatus === 'CONNECTING'} onClick={handleCreateGame} className="border-2 border-[#F0FF00] p-4 text-xs font-black uppercase tracking-widest hover:bg-[#F0FF00] hover:text-[#0A192F] transition-all disabled:opacity-30">POSTE CENTRAL</button>
                 <div className="flex flex-col space-y-2">
-                   <input value={inputCode} onChange={e => setInputCode(e.target.value)} className="bg-slate-900 border border-slate-700 p-2 text-[#F0FF00] placeholder:opacity-20 outline-none text-[10px] font-mono focus:border-[#F0FF00]" placeholder="CODE MJ" />
+                   <input 
+                      value={inputCode} 
+                      onChange={e => setInputCode(e.target.value.replace(/\D/g,'').slice(0,4))} 
+                      className="bg-slate-900 border border-slate-700 p-2 text-[#F0FF00] placeholder:opacity-20 outline-none text-[12px] text-center font-mono focus:border-[#F0FF00] tracking-[0.5em]" 
+                      placeholder="0000" 
+                      type="tel"
+                   />
                    <button disabled={connectionStatus === 'CONNECTING'} onClick={handleJoinGame} className="border-2 border-slate-500 p-2 text-[10px] font-black uppercase tracking-widest hover:bg-slate-500 hover:text-white transition-all disabled:opacity-30">{connectionStatus === 'CONNECTING' ? 'LIAISON...' : 'REJOINDRE'}</button>
                 </div>
               </div>
@@ -315,7 +346,7 @@ const App: React.FC = () => {
             <div className="space-y-4 py-4 text-center">
               <div className="bg-slate-900/90 p-5 border border-slate-700 shadow-2xl relative overflow-hidden">
                 <p className="text-[10px] opacity-40 uppercase mb-2 font-black tracking-widest">Fréquence Opérationnelle</p>
-                <p className="text-2xl font-mono font-black tracking-[0.2em] text-[#F0FF00] select-all break-all">{session.code || peerId || "SYNC..."}</p>
+                <p className="text-5xl font-mono font-black tracking-[0.2em] text-[#F0FF00] select-all">{session.code || peerId || "SYNC..."}</p>
               </div>
               <div className="flex justify-between items-center px-1">
                  <span className="text-[10px] text-slate-400 uppercase tracking-widest font-black">Agents : {session.players.length}</span>
@@ -353,7 +384,7 @@ const App: React.FC = () => {
           <div className={`w-2.5 h-2.5 rounded-full ${connectionStatus === 'CONNECTED' ? 'bg-green-500 animate-pulse shadow-[0_0_12px_#22c55e]' : 'bg-red-500'}`}></div>
           <div className="flex flex-col"><span className="text-[8px] opacity-40 font-bold uppercase tracking-widest">Agent</span><span className="text-[10px] font-black">{currentPlayer?.name}</span></div>
         </div>
-        <div className="flex flex-col items-center"><span className="text-[8px] opacity-40 font-bold uppercase tracking-widest">Secteur</span><span className="text-[10px] font-black text-[#F0FF00] font-mono">{session.code?.substring(0,8) || "---"}</span></div>
+        <div className="flex flex-col items-center"><span className="text-[8px] opacity-40 font-bold uppercase tracking-widest">Secteur</span><span className="text-[10px] font-black text-[#F0FF00] font-mono">{session.code || "---"}</span></div>
         <div className="flex flex-col items-end"><span className="text-[8px] opacity-40 font-bold uppercase tracking-widest">Statut</span><span className="text-[10px] font-black uppercase text-blue-400">{session.status}</span></div>
       </header>
 
