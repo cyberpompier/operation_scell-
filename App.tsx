@@ -25,7 +25,8 @@ const App: React.FC = () => {
     players: [],
     status: GameStatus.LOBBY,
     sabotage: { isActive: false, startTime: null, targetId: null, status: 'IDLE' },
-    codisCheckUsed: false
+    codisCheckUsed: false,
+    votes: {}
   });
   const sessionRef = useRef<GameSession>(session);
 
@@ -41,20 +42,16 @@ const App: React.FC = () => {
   const [showSuccessOverlay, setShowSuccessOverlay] = useState(false);
 
   // --- SYNCHRONISATION CRITIQUE DU RÔLE ---
-  // Met à jour le joueur local quand la session change (ex: début de partie, attribution des rôles)
   useEffect(() => {
     if (session.status === GameStatus.ACTIVE && currentPlayer) {
        const syncedPlayer = session.players.find(p => p.id === currentPlayer.id);
-       // On vérifie si le rôle a changé pour éviter les boucles infinies, mais on met à jour si nécessaire
        if (syncedPlayer && syncedPlayer.role !== currentPlayer.role) {
            console.log(`[SYS] RÔLE MIS À JOUR : ${currentPlayer.role} -> ${syncedPlayer.role}`);
            setCurrentPlayer(syncedPlayer);
-           // Reset briefing pour forcer la régénération avec le nouveau rôle
            setBriefing(''); 
        }
     }
   }, [session.players, session.status, currentPlayer?.id]);
-  // ----------------------------------------
 
   // Fonction de diffusion (Host uniquement)
   const broadcastSession = (newSession: GameSession) => {
@@ -68,7 +65,6 @@ const App: React.FC = () => {
   };
 
   // Logique de traitement des actions (Host uniquement)
-  // Utilisation d'une ref pour que les callbacks PeerJS appellent toujours la version la plus récente
   const handleClientAction = (senderId: string, action: { type: string, payload: any }) => {
     const current = sessionRef.current;
     console.log(`[MJ] Traitement Action: ${action.type} de ${senderId}`);
@@ -82,33 +78,28 @@ const App: React.FC = () => {
           const updatedPlayers = [...current.players, newPlayer];
           broadcastSession({ ...current, players: updatedPlayers });
         } else {
-          console.log(`[MJ] Agent déjà connu : ${newPlayer.name}`);
           broadcastSession({ ...current });
         }
         break;
       case 'SABOTAGE_START':
-        // Étape 1 : L'infiltré demande le sabotage -> On ouvre l'interface caméra (READY_FOR_UPLOAD)
-        // Pas de timer ici, pas d'alerte générale encore.
         broadcastSession({
           ...current,
           sabotage: { isActive: true, startTime: null, targetId: null, status: 'READY_FOR_UPLOAD' },
         });
         break;
       case 'SABOTAGE_CONFIRM':
-        // Étape 2 : Photo reçue -> On lance le timer (PENDING) et l'alerte
         broadcastSession({
           ...current,
           sabotage: { 
             ...current.sabotage, 
             status: 'PENDING', 
             startTime: Date.now(),
-            photoUri: action.payload // La photo est stockée
+            photoUri: action.payload 
           },
           alertMsg: "INTRUSION DÉTECTÉE - SCAN EN COURS"
         });
         break;
       case 'SABOTAGE_REPORT':
-        // Les gardes ont trouvé le sabotage avant la fin du timer
         broadcastSession({
           ...current,
           sabotage: { ...current.sabotage, isActive: false, status: 'DEJOUÉ' },
@@ -119,12 +110,25 @@ const App: React.FC = () => {
         }, 4000);
         break;
       case 'SABOTAGE_SUCCESS_TIMER':
-        // Le timer est fini sans intervention des gardes -> Victoire Infiltré
         broadcastSession({
           ...current,
           sabotage: { ...current.sabotage, status: 'COMPLETED', isActive: false },
           alertMsg: "SCELLÉ COMPROMIS - ZONE ROUGE"
         });
+        break;
+      case 'START_VOTE':
+        broadcastSession({
+            ...current,
+            status: GameStatus.VOTING,
+            alertMsg: "CONSEIL DISCIPLINAIRE - VOTE REQUIS"
+        });
+        break;
+      case 'CAST_VOTE':
+        const newVotes = { ...current.votes, [senderId]: action.payload };
+        broadcastSession({ ...current, votes: newVotes });
+        break;
+      case 'REVEAL_RESULTS':
+        broadcastSession({ ...current, status: GameStatus.FINISHED, alertMsg: undefined });
         break;
       case 'BIP_TRIGGER':
         broadcastSession({ ...current, status: GameStatus.BIP_ALERTE });
@@ -166,7 +170,8 @@ const App: React.FC = () => {
       players: [admin],
       status: GameStatus.LOBBY,
       sabotage: { isActive: false, startTime: null, targetId: null, status: 'IDLE' },
-      codisCheckUsed: false
+      codisCheckUsed: false,
+      votes: {}
     };
     setSession(initialSession);
 
@@ -181,20 +186,13 @@ const App: React.FC = () => {
     });
 
     p.on('connection', (conn) => {
-      console.log(`[MJ] Connexion entrante : ${conn.peer}`);
       connectionsRef.current[conn.peer] = conn;
-
       conn.on('open', () => {
-        console.log(`[MJ] Canal ouvert avec ${conn.peer}. Envoi configuration...`);
         conn.send({ type: 'HANDSHAKE_OK', payload: sessionRef.current });
       });
-
       conn.on('data', (data: any) => {
-        if (data && data.type) {
-          actionRef.current(data.senderId || conn.peer, data);
-        }
+        if (data && data.type) actionRef.current(data.senderId || conn.peer, data);
       });
-
       conn.on('close', () => {
         delete connectionsRef.current[conn.peer];
       });
@@ -208,13 +206,8 @@ const App: React.FC = () => {
 
   const handleJoinGame = () => {
     const cleanCode = inputCode.trim();
-    if (!cleanCode) {
-      setErrorMessage("Code MJ requis");
-      return;
-    }
-    setErrorMessage(null);
-    setIsHost(false);
-    setConnectionStatus('CONNECTING');
+    if (!cleanCode) { setErrorMessage("Code MJ requis"); return; }
+    setErrorMessage(null); setIsHost(false); setConnectionStatus('CONNECTING');
 
     const playerId = 'unit-' + Math.random().toString(36).substr(2, 4);
     const player: Player = { id: playerId, name: inputName || 'UNITÉ', role: Role.GARDE, isNeutralised: false };
@@ -226,12 +219,9 @@ const App: React.FC = () => {
     p.on('open', (myId) => {
       setPeerId(myId);
       const conn = p.connect(cleanCode, { reliable: true });
-      
       const timeout = setTimeout(() => {
         if (connectionStatus !== 'CONNECTED') {
-          setErrorMessage("Échec liaison MJ.");
-          setConnectionStatus('DISCONNECTED');
-          p.destroy();
+          setErrorMessage("Échec liaison MJ."); setConnectionStatus('DISCONNECTED'); p.destroy();
         }
       }, 8000);
 
@@ -239,29 +229,18 @@ const App: React.FC = () => {
         clearTimeout(timeout);
         connectionsRef.current[cleanCode] = conn;
         setConnectionStatus('CONNECTED');
-        // Identification immédiate
         conn.send({ type: 'JOIN', payload: player, senderId: playerId });
       });
 
       conn.on('data', (data: any) => {
         if (data.type === 'HANDSHAKE_OK' || data.type === 'SYNC_SESSION') {
           if (data.payload) setSession(data.payload);
-          if (data.type === 'HANDSHAKE_OK') {
-             conn.send({ type: 'JOIN', payload: player, senderId: playerId });
-          }
+          if (data.type === 'HANDSHAKE_OK') conn.send({ type: 'JOIN', payload: player, senderId: playerId });
         }
       });
-
-      conn.on('close', () => {
-        setConnectionStatus('DISCONNECTED');
-        setErrorMessage("Liaison Central coupée.");
-      });
+      conn.on('close', () => { setConnectionStatus('DISCONNECTED'); setErrorMessage("Liaison Central coupée."); });
     });
-
-    p.on('error', (err) => {
-      setErrorMessage(`Erreur liaison : ${err.type}`);
-      setConnectionStatus('DISCONNECTED');
-    });
+    p.on('error', (err) => { setErrorMessage(`Erreur liaison : ${err.type}`); setConnectionStatus('DISCONNECTED'); });
   };
 
   useEffect(() => {
@@ -271,15 +250,13 @@ const App: React.FC = () => {
     }
   }, [session.status, currentPlayer?.role]);
 
-  // TIMER SABOTAGE (Seulement si statut PENDING, c'est à dire après la photo)
+  // TIMER SABOTAGE
   useEffect(() => {
     if (session.sabotage.status === 'PENDING' && session.sabotage.startTime) {
       const timer = setInterval(() => {
         const elapsed = Date.now() - (session.sabotage.startTime || 0);
         const remaining = Math.max(0, SABOTAGE_TIMER_MS - elapsed);
         setSabotageTimeLeft(remaining);
-        
-        // Fin du timer = Sabotage réussi par l'Infiltré
         if (remaining <= 0 && isHost) {
           actionRef.current('mj', { type: 'SABOTAGE_SUCCESS_TIMER', payload: null });
           clearInterval(timer);
@@ -293,21 +270,14 @@ const App: React.FC = () => {
     if (!isHost) return;
     const players = [...session.players];
     const nonAdmin = players.filter(p => p.role !== Role.MJ);
-    if (nonAdmin.length < 1) {
-        setErrorMessage("Effectif insuffisant.");
-        return;
-    }
+    if (nonAdmin.length < 1) { setErrorMessage("Effectif insuffisant."); return; }
     const rolesPool = [Role.INFILTRÉ, Role.CODIS];
     while (rolesPool.length < nonAdmin.length) rolesPool.push(Role.GARDE);
-    // Mélange de Fisher-Yates pour plus d'aléatoire
     for (let i = rolesPool.length - 1; i > 0; i--) {
         const j = Math.floor(Math.random() * (i + 1));
         [rolesPool[i], rolesPool[j]] = [rolesPool[j], rolesPool[i]];
     }
-    
-    nonAdmin.forEach(p => {
-      p.role = rolesPool.pop() || Role.GARDE;
-    });
+    nonAdmin.forEach(p => { p.role = rolesPool.pop() || Role.GARDE; });
     broadcastSession({ ...session, players, status: GameStatus.ACTIVE });
   };
 
@@ -318,13 +288,11 @@ const App: React.FC = () => {
             <h1 className="text-4xl font-bold tracking-tighter italic glow-neon mb-2 uppercase font-['Orbitron']">Opération Scellé</h1>
             <p className="text-[10px] opacity-60 uppercase tracking-[0.5em] font-black text-[#F0FF00]">Réseau Tactique Sapeurs-Pompiers</p>
         </div>
-        
         {errorMessage && (
           <div className="bg-red-950/80 border-l-4 border-red-500 p-4 text-[10px] text-red-200 font-bold uppercase animate-pulse">
             <span className="text-red-500 mr-2">[!]</span> {errorMessage}
           </div>
         )}
-
         {connectionStatus !== 'CONNECTED' && !isHost ? (
           <HUDFrame title="Initialisation Unité">
             <div className="space-y-4 py-4">
@@ -334,27 +302,10 @@ const App: React.FC = () => {
                 placeholder="ID AGENT" 
               />
               <div className="grid grid-cols-2 gap-4 pt-2">
-                <button 
-                    disabled={connectionStatus === 'CONNECTING'}
-                    onClick={handleCreateGame} 
-                    className="border-2 border-[#F0FF00] p-4 text-xs font-black uppercase tracking-widest hover:bg-[#F0FF00] hover:text-[#0A192F] transition-all disabled:opacity-30"
-                >
-                    POSTE CENTRAL
-                </button>
+                <button disabled={connectionStatus === 'CONNECTING'} onClick={handleCreateGame} className="border-2 border-[#F0FF00] p-4 text-xs font-black uppercase tracking-widest hover:bg-[#F0FF00] hover:text-[#0A192F] transition-all disabled:opacity-30">POSTE CENTRAL</button>
                 <div className="flex flex-col space-y-2">
-                   <input 
-                    value={inputCode} 
-                    onChange={e => setInputCode(e.target.value)}
-                    className="bg-slate-900 border border-slate-700 p-2 text-[#F0FF00] placeholder:opacity-20 outline-none text-[10px] font-mono focus:border-[#F0FF00]" 
-                    placeholder="CODE MJ" 
-                   />
-                   <button 
-                    disabled={connectionStatus === 'CONNECTING'}
-                    onClick={handleJoinGame} 
-                    className="border-2 border-slate-500 p-2 text-[10px] font-black uppercase tracking-widest hover:bg-slate-500 hover:text-white transition-all disabled:opacity-30"
-                   >
-                    {connectionStatus === 'CONNECTING' ? 'LIAISON...' : 'REJOINDRE'}
-                   </button>
+                   <input value={inputCode} onChange={e => setInputCode(e.target.value)} className="bg-slate-900 border border-slate-700 p-2 text-[#F0FF00] placeholder:opacity-20 outline-none text-[10px] font-mono focus:border-[#F0FF00]" placeholder="CODE MJ" />
+                   <button disabled={connectionStatus === 'CONNECTING'} onClick={handleJoinGame} className="border-2 border-slate-500 p-2 text-[10px] font-black uppercase tracking-widest hover:bg-slate-500 hover:text-white transition-all disabled:opacity-30">{connectionStatus === 'CONNECTING' ? 'LIAISON...' : 'REJOINDRE'}</button>
                 </div>
               </div>
             </div>
@@ -364,39 +315,22 @@ const App: React.FC = () => {
             <div className="space-y-4 py-4 text-center">
               <div className="bg-slate-900/90 p-5 border border-slate-700 shadow-2xl relative overflow-hidden">
                 <p className="text-[10px] opacity-40 uppercase mb-2 font-black tracking-widest">Fréquence Opérationnelle</p>
-                <p className="text-2xl font-mono font-black tracking-[0.2em] text-[#F0FF00] select-all break-all">
-                    {session.code || peerId || "SYNC..."}
-                </p>
+                <p className="text-2xl font-mono font-black tracking-[0.2em] text-[#F0FF00] select-all break-all">{session.code || peerId || "SYNC..."}</p>
               </div>
-              
               <div className="flex justify-between items-center px-1">
                  <span className="text-[10px] text-slate-400 uppercase tracking-widest font-black">Agents : {session.players.length}</span>
-                 <div className="flex space-x-1">
-                    {[...Array(session.players.length)].map((_,i) => <div key={i} className="w-2 h-3 bg-[#F0FF00] animate-pulse"></div>)}
-                 </div>
+                 <div className="flex space-x-1">{[...Array(session.players.length)].map((_,i) => <div key={i} className="w-2 h-3 bg-[#F0FF00] animate-pulse"></div>)}</div>
               </div>
-
               <ul className="space-y-1 text-[11px] max-h-56 overflow-y-auto text-left font-mono border-t border-slate-800 pt-3">
                 {session.players.map(p => (
                   <li key={p.id} className="flex justify-between items-center border-b border-slate-900/50 py-3 px-2">
-                    <span className={p.id === currentPlayer?.id ? "text-[#F0FF00] font-black" : "text-slate-400"}>
-                        {p.id === currentPlayer?.id ? ">> " : "   "}{p.name}
-                    </span>
-                    <span className={`text-[8px] px-2 py-0.5 border rounded-sm uppercase font-black ${p.role === Role.MJ ? 'border-red-500 text-red-500' : 'border-slate-700 text-slate-500'}`}>
-                        {p.role === Role.MJ ? 'MJ' : 'UNITÉ'}
-                    </span>
+                    <span className={p.id === currentPlayer?.id ? "text-[#F0FF00] font-black" : "text-slate-400"}>{p.id === currentPlayer?.id ? ">> " : "   "}{p.name}</span>
+                    <span className={`text-[8px] px-2 py-0.5 border rounded-sm uppercase font-black ${p.role === Role.MJ ? 'border-red-500 text-red-500' : 'border-slate-700 text-slate-500'}`}>{p.role === Role.MJ ? 'MJ' : 'UNITÉ'}</span>
                   </li>
                 ))}
               </ul>
-
               {isHost ? (
-                <button 
-                    onClick={handleStartGame} 
-                    disabled={session.players.length < 2} 
-                    className="w-full mt-6 bg-[#F0FF00] text-[#0A192F] p-5 font-black tracking-[0.3em] text-sm uppercase disabled:opacity-20 shadow-[0_0_40px_rgba(240,255,0,0.2)] active:scale-95 transition-transform"
-                >
-                    DÉPLOYER LA GARDE
-                </button>
+                <button onClick={handleStartGame} disabled={session.players.length < 2} className="w-full mt-6 bg-[#F0FF00] text-[#0A192F] p-5 font-black tracking-[0.3em] text-sm uppercase disabled:opacity-20 shadow-[0_0_40px_rgba(240,255,0,0.2)] active:scale-95 transition-transform">DÉPLOYER LA GARDE</button>
               ) : (
                 <div className="py-8 flex flex-col items-center">
                     <div className="w-10 h-10 border-4 border-[#F0FF00] border-t-transparent rounded-full animate-spin mb-4"></div>
@@ -429,9 +363,7 @@ const App: React.FC = () => {
           <h2 className="text-6xl font-black text-white italic mb-6 glow-red uppercase tracking-tighter">ALERTE BIP</h2>
           <p className="text-sm text-red-200 tracking-[0.5em] uppercase mb-16 font-black">Interruption Opérationnelle Immédiate</p>
           {isHost && (
-            <button onClick={() => sendToHost('BIP_RELEASE', null)} className="border-4 border-white text-white px-14 py-7 font-black text-xl hover:bg-white hover:text-red-900 transition-all uppercase tracking-[0.3em] active:scale-90">
-                REPRENDRE
-            </button>
+            <button onClick={() => sendToHost('BIP_RELEASE', null)} className="border-4 border-white text-white px-14 py-7 font-black text-xl hover:bg-white hover:text-red-900 transition-all uppercase tracking-[0.3em] active:scale-90">REPRENDRE</button>
           )}
         </div>
       )}
@@ -439,7 +371,6 @@ const App: React.FC = () => {
       {showSuccessOverlay && (
         <div className="fixed inset-0 z-[200] bg-black/98 flex flex-col items-center justify-center text-center p-8 border-[15px] border-green-500 animate-neon-green">
            <h2 className="text-7xl font-black text-green-400 italic mb-6 glow-green uppercase font-['Orbitron']">SABOTAGE RÉUSSI</h2>
-           <p className="text-2xl font-black tracking-[0.6em] text-green-100 uppercase">Scellé compromis</p>
         </div>
       )}
 
@@ -451,172 +382,224 @@ const App: React.FC = () => {
           </div>
         )}
 
-        <HUDFrame title="Données de Mission" variant={currentPlayer?.role === Role.INFILTRÉ ? 'alert' : 'neon'}>
-          <div className="flex justify-between items-center mb-4">
-            <h3 className={`text-4xl font-black italic tracking-tighter uppercase ${roleColor}`}>{currentPlayer?.role}</h3>
-            <div className="animate-spin duration-[25000ms] opacity-50">{RETICLE_ICON}</div>
-          </div>
-          <div className="bg-slate-900/70 p-6 border-l-4 border-[#F0FF00] min-h-[100px] shadow-inner relative overflow-hidden">
-             <p className="text-[13px] font-mono leading-relaxed text-slate-100 italic whitespace-pre-wrap">{briefing || "Décryptage du dossier en cours... Liaison CODIS active."}</p>
-          </div>
-        </HUDFrame>
-
-        {/* --- INTERFACE MJ (SUPERVISION) --- */}
-        {currentPlayer?.role === Role.MJ && (
-           <HUDFrame title="Supervision Tactique" variant="neon">
-              <div className="space-y-4">
-                 <div className="bg-slate-900/50 p-4 border border-slate-700">
-                    <h4 className="text-[10px] uppercase tracking-widest text-slate-400 mb-3 border-b border-slate-800 pb-1">État des Agents</h4>
-                    <ul className="space-y-2">
-                      {session.players.filter(p => p.role !== Role.MJ).map(p => (
-                        <li key={p.id} className="flex justify-between items-center text-[11px] font-mono">
-                           <span className="text-white">{p.name}</span>
-                           <span className={`font-black uppercase ${p.role === Role.INFILTRÉ ? 'text-red-500' : p.role === Role.CODIS ? 'text-blue-400' : 'text-slate-500'}`}>
-                             {p.role}
-                           </span>
-                        </li>
-                      ))}
-                    </ul>
-                 </div>
-
-                 {session.sabotage.status === 'PENDING' && (
-                    <div className="bg-red-950/30 p-4 border border-red-900/50 animate-pulse">
-                        <p className="text-[10px] text-red-400 uppercase tracking-widest mb-1">Sabotage en cours</p>
-                        <p className="text-3xl font-black text-red-500 font-mono">
-                            {Math.floor(sabotageTimeLeft/1000/60)}:{Math.floor((sabotageTimeLeft/1000)%60).toString().padStart(2,'0')}
-                        </p>
-                        {session.sabotage.photoUri && (
-                            <div className="mt-2">
-                                <p className="text-[8px] text-red-300 uppercase">Preuve capturée</p>
-                                <img src={session.sabotage.photoUri} className="w-16 h-16 object-cover border border-red-500" />
-                            </div>
-                        )}
-                    </div>
-                 )}
-
-                 {session.sabotage.status === 'COMPLETED' && session.sabotage.photoUri && (
-                     <div className="space-y-2">
-                        <p className="text-[10px] text-green-400 uppercase tracking-widest">Sabotage Confirmé</p>
-                        <img src={session.sabotage.photoUri} className="w-full border-2 border-green-500" alt="Preuve" />
-                     </div>
-                 )}
+        {/* --- PHASE ACTIVE : JEU NORMAL --- */}
+        {session.status === GameStatus.ACTIVE && (
+          <>
+            <HUDFrame title="Données de Mission" variant={currentPlayer?.role === Role.INFILTRÉ ? 'alert' : 'neon'}>
+              <div className="flex justify-between items-center mb-4">
+                <h3 className={`text-4xl font-black italic tracking-tighter uppercase ${roleColor}`}>{currentPlayer?.role}</h3>
+                <div className="animate-spin duration-[25000ms] opacity-50">{RETICLE_ICON}</div>
               </div>
-           </HUDFrame>
-        )}
+              <div className="bg-slate-900/70 p-6 border-l-4 border-[#F0FF00] min-h-[100px] shadow-inner relative overflow-hidden">
+                <p className="text-[13px] font-mono leading-relaxed text-slate-100 italic whitespace-pre-wrap">{briefing || "Décryptage du dossier en cours... Liaison CODIS active."}</p>
+              </div>
+            </HUDFrame>
 
-        {/* --- INTERFACE INFILTRÉ --- */}
-        {currentPlayer?.role === Role.INFILTRÉ && (
-          <div className="space-y-5">
-            {/* Etape 1 : Bouton initial */}
-            {session.sabotage.status === 'IDLE' && (
-               <button onClick={() => sendToHost('SABOTAGE_START', null)} className="w-full bg-red-600 text-white p-8 font-black uppercase tracking-[0.5em] text-sm shadow-[0_15px_40px_rgba(255,0,0,0.5)] border-b-8 border-red-900 active:translate-y-1 transition-all">LANCER SABOTAGE</button>
-            )}
+            {/* SUPERVISION MJ */}
+            {currentPlayer?.role === Role.MJ && (
+              <HUDFrame title="Supervision Tactique" variant="neon">
+                  <div className="space-y-4">
+                    <div className="bg-slate-900/50 p-4 border border-slate-700">
+                        <h4 className="text-[10px] uppercase tracking-widest text-slate-400 mb-3 border-b border-slate-800 pb-1">État des Agents</h4>
+                        <ul className="space-y-2">
+                          {session.players.filter(p => p.role !== Role.MJ).map(p => (
+                            <li key={p.id} className="flex justify-between items-center text-[11px] font-mono">
+                              <span className="text-white">{p.name}</span>
+                              <span className={`font-black uppercase ${p.role === Role.INFILTRÉ ? 'text-red-500' : p.role === Role.CODIS ? 'text-blue-400' : 'text-slate-500'}`}>{p.role}</span>
+                            </li>
+                          ))}
+                        </ul>
+                    </div>
 
-            {/* Etape 2 : Prise de photo (READY_FOR_UPLOAD) - Pas encore de timer public */}
-            {session.sabotage.status === 'READY_FOR_UPLOAD' && (
-              <HUDFrame title="Preuve de Neutralisation" variant="alert">
-                <div className="space-y-5">
-                  {!capturedPhoto ? (
-                    <div className="h-72 bg-slate-900/60 border-4 border-dashed border-red-600 flex flex-col items-center justify-center relative hover:bg-red-900/20 transition-colors">
-                      <input type="file" accept="image/*" capture="environment" onChange={(e) => {
-                         const file = e.target.files?.[0];
-                         if (file) {
-                           const r = new FileReader();
-                           r.onloadend = () => setCapturedPhoto(r.result as string);
-                           r.readAsDataURL(file);
-                         }
-                      }} className="opacity-0 absolute inset-0 w-full h-full cursor-pointer z-10" />
-                      <div className="text-center p-6">
-                        <div className="text-red-600 mb-6 flex justify-center scale-[2.5]">{RETICLE_ICON}</div>
-                        <p className="text-[13px] font-black text-red-400 uppercase tracking-[0.3em]">Scanner l'objet compromis</p>
-                      </div>
-                    </div>
-                  ) : (
-                    <div className="relative aspect-square border-4 border-green-500 bg-black overflow-hidden shadow-2xl">
-                       <img src={capturedPhoto} className="w-full h-full object-contain" alt="Scan" />
-                       <button onClick={() => setCapturedPhoto(null)} className="absolute top-5 right-5 bg-red-600 px-5 py-2 text-[11px] font-black uppercase border-b-4 border-red-900">RE-SCANNER</button>
-                    </div>
-                  )}
-                  <button onClick={() => {
-                     // Envoi de la photo -> Déclenche le timer (PENDING)
-                     sendToHost('SABOTAGE_CONFIRM', capturedPhoto);
-                     setCapturedPhoto(null);
-                  }} disabled={!capturedPhoto} className="w-full bg-red-600 text-white p-7 font-black uppercase tracking-[0.3em] text-sm disabled:opacity-30 border-b-8 border-red-900 shadow-xl">VALIDER LE SABOTAGE</button>
-                </div>
+                    {(session.sabotage.status === 'COMPLETED' || session.sabotage.status === 'DEJOUÉ') && (
+                        <div className="space-y-4 pt-4 border-t border-slate-700">
+                             <div className={`p-4 border-l-4 ${session.sabotage.status === 'COMPLETED' ? 'border-red-500 bg-red-950/20' : 'border-green-500 bg-green-950/20'}`}>
+                                <p className="text-[10px] uppercase tracking-widest opacity-70 mb-1">Rapport de Mission</p>
+                                <p className="text-lg font-black uppercase">{session.sabotage.status === 'COMPLETED' ? "SCELLE COMPROMIS" : "MENACE NEUTRALISÉE"}</p>
+                             </div>
+                             <button onClick={() => sendToHost('START_VOTE', null)} className="w-full bg-[#F0FF00] text-[#0A192F] p-4 font-black uppercase tracking-[0.2em] shadow-lg hover:bg-white transition-all">
+                                CONVOQUER LE CONSEIL
+                             </button>
+                        </div>
+                    )}
+                    
+                    {session.sabotage.status === 'PENDING' && (
+                        <div className="bg-red-950/30 p-4 border border-red-900/50 animate-pulse">
+                            <p className="text-[10px] text-red-400 uppercase tracking-widest mb-1">Sabotage en cours</p>
+                            <p className="text-3xl font-black text-red-500 font-mono">
+                                {Math.floor(sabotageTimeLeft/1000/60)}:{Math.floor((sabotageTimeLeft/1000)%60).toString().padStart(2,'0')}
+                            </p>
+                            {session.sabotage.photoUri && (
+                                <img src={session.sabotage.photoUri} className="w-16 h-16 object-cover border border-red-500 mt-2" />
+                            )}
+                        </div>
+                    )}
+                  </div>
               </HUDFrame>
             )}
 
-            {/* Etape 3 : Timer en cours (PENDING) */}
-            {session.sabotage.status === 'PENDING' && (
-               <HUDFrame title="Latence de Sécurité" variant="alert">
-                  <div className="text-8xl font-black text-center text-red-500 font-mono py-10 tracking-[0.2em] glow-red animate-pulse">
-                    {Math.floor(sabotageTimeLeft/1000/60)}:{Math.floor((sabotageTimeLeft/1000)%60).toString().padStart(2,'0')}
+            {/* INFILTRÉ */}
+            {currentPlayer?.role === Role.INFILTRÉ && (
+              <div className="space-y-5">
+                {session.sabotage.status === 'IDLE' && (
+                  <button onClick={() => sendToHost('SABOTAGE_START', null)} className="w-full bg-red-600 text-white p-8 font-black uppercase tracking-[0.5em] text-sm shadow-[0_15px_40px_rgba(255,0,0,0.5)] border-b-8 border-red-900 active:translate-y-1 transition-all">LANCER SABOTAGE</button>
+                )}
+                {session.sabotage.status === 'READY_FOR_UPLOAD' && (
+                  <HUDFrame title="Preuve de Neutralisation" variant="alert">
+                    <div className="space-y-5">
+                      {!capturedPhoto ? (
+                        <div className="h-72 bg-slate-900/60 border-4 border-dashed border-red-600 flex flex-col items-center justify-center relative hover:bg-red-900/20 transition-colors">
+                          <input type="file" accept="image/*" capture="environment" onChange={(e) => {
+                            const file = e.target.files?.[0];
+                            if (file) { const r = new FileReader(); r.onloadend = () => setCapturedPhoto(r.result as string); r.readAsDataURL(file); }
+                          }} className="opacity-0 absolute inset-0 w-full h-full cursor-pointer z-10" />
+                          <div className="text-center p-6"><div className="text-red-600 mb-6 flex justify-center scale-[2.5]">{RETICLE_ICON}</div><p className="text-[13px] font-black text-red-400 uppercase tracking-[0.3em]">Scanner l'objet compromis</p></div>
+                        </div>
+                      ) : (
+                        <div className="relative aspect-square border-4 border-green-500 bg-black overflow-hidden shadow-2xl">
+                          <img src={capturedPhoto} className="w-full h-full object-contain" alt="Scan" />
+                          <button onClick={() => setCapturedPhoto(null)} className="absolute top-5 right-5 bg-red-600 px-5 py-2 text-[11px] font-black uppercase border-b-4 border-red-900">RE-SCANNER</button>
+                        </div>
+                      )}
+                      <button onClick={() => { sendToHost('SABOTAGE_CONFIRM', capturedPhoto); setCapturedPhoto(null); }} disabled={!capturedPhoto} className="w-full bg-red-600 text-white p-7 font-black uppercase tracking-[0.3em] text-sm disabled:opacity-30 border-b-8 border-red-900 shadow-xl">VALIDER LE SABOTAGE</button>
+                    </div>
+                  </HUDFrame>
+                )}
+                {session.sabotage.status === 'PENDING' && (
+                  <HUDFrame title="Latence de Sécurité" variant="alert">
+                      <div className="text-8xl font-black text-center text-red-500 font-mono py-10 tracking-[0.2em] glow-red animate-pulse">
+                        {Math.floor(sabotageTimeLeft/1000/60)}:{Math.floor((sabotageTimeLeft/1000)%60).toString().padStart(2,'0')}
+                      </div>
+                      <p className="text-[10px] text-center opacity-70 uppercase font-black tracking-[0.4em]">Sabotage actif. Restez furtif.</p>
+                  </HUDFrame>
+                )}
+                {session.sabotage.status === 'COMPLETED' && (
+                  <div className="bg-green-500/20 p-6 border-2 border-green-500 text-center">
+                      <h2 className="text-2xl font-black text-green-400 mb-2 uppercase">Mission Accomplie</h2>
+                      <p className="text-[10px] uppercase tracking-widest text-green-200">En attente du Conseil...</p>
                   </div>
-                  <p className="text-[10px] text-center opacity-70 uppercase font-black tracking-[0.4em]">Sabotage actif. Restez furtif.</p>
-               </HUDFrame>
+                )}
+              </div>
             )}
-            
-            {/* Etape 4 : Succès (COMPLETED) */}
-             {session.sabotage.status === 'COMPLETED' && (
-               <div className="bg-green-500/20 p-6 border-2 border-green-500 text-center">
-                   <h2 className="text-2xl font-black text-green-400 mb-2 uppercase">Mission Accomplie</h2>
-                   <p className="text-[10px] uppercase tracking-widest text-green-200">Zone Scellée Compromise</p>
-               </div>
+
+            {/* GARDE */}
+            {currentPlayer?.role !== Role.MJ && currentPlayer?.role !== Role.INFILTRÉ && (
+              <HUDFrame title="Module de Garde" variant={session.sabotage.status === 'PENDING' ? 'alert' : 'muted'}>
+                  <button onClick={() => sendToHost('SABOTAGE_REPORT', null)} disabled={session.sabotage.status !== 'PENDING'} className={`w-full p-8 font-black uppercase tracking-[0.4em] text-[11px] border-4 transition-all ${session.sabotage.status === 'PENDING' ? 'border-red-600 text-red-500 animate-pulse bg-red-950/40 shadow-[0_0_30px_rgba(255,0,0,0.3)]' : 'border-slate-800 text-slate-700 opacity-60'}`}>
+                    {session.sabotage.status === 'PENDING' ? "ANOMALIE DÉTECTÉE ! SIGNALER" : "ZÉRO ACTIVITÉ SUSPECTE"}
+                  </button>
+              </HUDFrame>
             )}
-          </div>
+
+            {/* CODIS */}
+            {currentPlayer?.role === Role.CODIS && (
+              <HUDFrame title="Terminal Renseignement">
+                {!session.codisCheckUsed ? (
+                  <div className="space-y-5">
+                    <select id="codis-sel" className="w-full bg-slate-900 border-2 border-slate-700 p-5 text-[14px] text-[#F0FF00] font-mono outline-none appearance-none focus:border-[#F0FF00] shadow-inner">
+                        <option value="">-- CIBLE À ANALYSER --</option>
+                        {session.players.filter(p => p.id !== currentPlayer.id && p.role !== Role.MJ).map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+                    </select>
+                    <button onClick={async () => {
+                      const tid = (document.getElementById('codis-sel') as HTMLSelectElement).value;
+                      if(!tid) return;
+                      const target = session.players.find(p => p.id === tid);
+                      if(!target) return;
+                      const report = await analyzeIntel(currentPlayer.name, target.name);
+                      setIntelReport(`OBJET : ${target.name}\nRÉSULTAT : ${report}\nCONCLUSION : ${target.role === Role.INFILTRÉ ? 'HOSTILE' : 'ALLIÉ'}`);
+                      if (isHost) broadcastSession({ ...session, codisCheckUsed: true });
+                      else sendToHost('CODIS_USE', null);
+                    }} className="w-full bg-blue-700 text-white p-6 font-black text-xs tracking-[0.3em] uppercase border-b-8 border-blue-900 active:translate-y-1 transition-all shadow-lg">ANALYSE BIOMÉTRIQUE CODIS</button>
+                  </div>
+                ) : (
+                  <div className="bg-blue-900/40 p-6 border-l-4 border-blue-500 font-mono text-[12px] text-blue-100 leading-relaxed italic shadow-inner">
+                    {intelReport || "SESSIONS ÉPUISÉES. TERMINAL VERROUILLÉ."}
+                  </div>
+                )}
+              </HUDFrame>
+            )}
+          </>
         )}
 
-        {/* --- INTERFACE GARDE (Tout le monde sauf MJ et Infiltré) --- */}
-        {currentPlayer?.role !== Role.MJ && currentPlayer?.role !== Role.INFILTRÉ && (
-           <HUDFrame title="Module de Garde" variant={session.sabotage.status === 'PENDING' ? 'alert' : 'muted'}>
-              <button 
-                onClick={() => sendToHost('SABOTAGE_REPORT', null)} 
-                disabled={session.sabotage.status !== 'PENDING'}
-                className={`w-full p-8 font-black uppercase tracking-[0.4em] text-[11px] border-4 transition-all ${session.sabotage.status === 'PENDING' ? 'border-red-600 text-red-500 animate-pulse bg-red-950/40 shadow-[0_0_30px_rgba(255,0,0,0.3)]' : 'border-slate-800 text-slate-700 opacity-60'}`}
-              >
-                {session.sabotage.status === 'PENDING' ? "ANOMALIE DÉTECTÉE ! SIGNALER" : "ZÉRO ACTIVITÉ SUSPECTE"}
-              </button>
-           </HUDFrame>
+        {/* --- PHASE DE VOTE --- */}
+        {session.status === GameStatus.VOTING && (
+          <HUDFrame title="CONSEIL DISCIPLINAIRE" variant="alert">
+             <div className="space-y-6">
+                 <div className="text-center p-4 border-b border-red-900/50">
+                     <p className="text-red-500 uppercase font-black tracking-widest text-xs mb-2">Désignation du Suspect</p>
+                     <p className="text-slate-400 text-[10px]">Votez pour l'agent soupçonné d'infiltration.</p>
+                 </div>
+                 
+                 {currentPlayer?.role !== Role.MJ ? (
+                     <div className="grid grid-cols-1 gap-3">
+                         {session.players.filter(p => p.role !== Role.MJ && p.id !== currentPlayer?.id).map(p => (
+                             <button 
+                                key={p.id}
+                                onClick={() => sendToHost('CAST_VOTE', p.id)}
+                                className={`p-4 border border-slate-700 bg-slate-900/50 text-left flex justify-between items-center ${session.votes[currentPlayer!.id] === p.id ? 'border-[#F0FF00] bg-[#F0FF00]/10' : ''}`}
+                             >
+                                 <span className="font-mono text-sm">{p.name}</span>
+                                 {session.votes[currentPlayer!.id] === p.id && <div className="w-3 h-3 bg-[#F0FF00]"></div>}
+                             </button>
+                         ))}
+                     </div>
+                 ) : (
+                     <div className="space-y-4">
+                        <h4 className="text-xs uppercase text-slate-500 font-black">État des votes</h4>
+                        <ul className="space-y-2">
+                             {session.players.filter(p => p.role !== Role.MJ).map(p => (
+                                 <li key={p.id} className="flex justify-between text-[11px] border-b border-slate-800 pb-1">
+                                     <span>{p.name}</span>
+                                     <span className={session.votes[p.id] ? "text-green-500" : "text-red-500"}>{session.votes[p.id] ? "A VOTÉ" : "EN ATTENTE"}</span>
+                                 </li>
+                             ))}
+                        </ul>
+                        <button 
+                            onClick={() => sendToHost('REVEAL_RESULTS', null)}
+                            className="w-full bg-red-600 text-white p-4 font-black uppercase tracking-widest mt-4 hover:bg-red-500"
+                        >
+                            CLÔTURER ET RÉVÉLER
+                        </button>
+                     </div>
+                 )}
+             </div>
+          </HUDFrame>
         )}
 
-        {/* --- INTERFACE CODIS --- */}
-        {currentPlayer?.role === Role.CODIS && (
-           <HUDFrame title="Terminal Renseignement">
-             {!session.codisCheckUsed ? (
-               <div className="space-y-5">
-                 <select id="codis-sel" className="w-full bg-slate-900 border-2 border-slate-700 p-5 text-[14px] text-[#F0FF00] font-mono outline-none appearance-none focus:border-[#F0FF00] shadow-inner">
-                    <option value="">-- CIBLE À ANALYSER --</option>
-                    {session.players.filter(p => p.id !== currentPlayer.id && p.role !== Role.MJ).map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
-                 </select>
-                 <button onClick={async () => {
-                   const tid = (document.getElementById('codis-sel') as HTMLSelectElement).value;
-                   if(!tid) return;
-                   const target = session.players.find(p => p.id === tid);
-                   if(!target) return;
-                   const report = await analyzeIntel(currentPlayer.name, target.name);
-                   setIntelReport(`OBJET : ${target.name}\nRÉSULTAT : ${report}\nCONCLUSION : ${target.role === Role.INFILTRÉ ? 'HOSTILE' : 'ALLIÉ'}`);
-                   if (isHost) broadcastSession({ ...session, codisCheckUsed: true });
-                   else sendToHost('CODIS_USE', null);
-                 }} className="w-full bg-blue-700 text-white p-6 font-black text-xs tracking-[0.3em] uppercase border-b-8 border-blue-900 active:translate-y-1 transition-all shadow-lg">ANALYSE BIOMÉTRIQUE CODIS</button>
-               </div>
-             ) : (
-               <div className="bg-blue-900/40 p-6 border-l-4 border-blue-500 font-mono text-[12px] text-blue-100 leading-relaxed italic shadow-inner">
-                 {intelReport || "SESSIONS ÉPUISÉES. TERMINAL VERROUILLÉ."}
-               </div>
-             )}
-           </HUDFrame>
+        {/* --- ÉCRAN DE FIN --- */}
+        {session.status === GameStatus.FINISHED && (
+            <div className="space-y-6 text-center">
+                <h2 className="text-4xl font-black text-[#F0FF00] uppercase mb-8">Rapport Final</h2>
+                
+                <div className="space-y-4">
+                    {session.players.map(p => (
+                        <div key={p.id} className={`p-4 border-2 ${p.role === Role.INFILTRÉ ? 'border-red-500 bg-red-950/30' : 'border-slate-700 bg-slate-900/50'} flex justify-between items-center`}>
+                            <span className="font-bold text-lg">{p.name}</span>
+                            <span className={`font-black uppercase tracking-widest ${p.role === Role.INFILTRÉ ? 'text-red-500' : 'text-slate-400'}`}>{p.role}</span>
+                        </div>
+                    ))}
+                </div>
+
+                {isHost && (
+                    <button onClick={() => window.location.reload()} className="mt-12 border-2 border-white text-white px-8 py-4 font-black uppercase tracking-widest hover:bg-white hover:text-black transition-all">
+                        NOUVELLE OPÉRATION
+                    </button>
+                )}
+            </div>
         )}
       </main>
 
-      <footer className="fixed bottom-0 left-0 right-0 p-5 bg-[#0A192F]/98 backdrop-blur-3xl border-t-2 border-slate-800 z-[90] shadow-[0_-15px_50px_rgba(0,0,0,0.6)]">
-        <button 
-          onClick={() => sendToHost(session.status === GameStatus.BIP_ALERTE ? 'BIP_RELEASE' : 'BIP_TRIGGER', null)}
-          className="w-full h-28 bg-red-600 rounded-2xl flex flex-col items-center justify-center shadow-[0_-10px_50px_rgba(255,0,0,0.6)] active:scale-95 transition-all border-b-[12px] border-red-900 active:border-b-0 hover:brightness-110"
-        >
-          <span className="text-4xl font-black text-white glow-red italic tracking-tighter uppercase mb-1 font-['Orbitron']">ALERTE BIP</span>
-          <span className="text-[11px] text-red-100 font-black uppercase tracking-[0.6em] opacity-90 animate-pulse">Priorité Opérationnelle</span>
-        </button>
-      </footer>
+      {session.status !== GameStatus.FINISHED && (
+          <footer className="fixed bottom-0 left-0 right-0 p-5 bg-[#0A192F]/98 backdrop-blur-3xl border-t-2 border-slate-800 z-[90] shadow-[0_-15px_50px_rgba(0,0,0,0.6)]">
+            <button 
+              onClick={() => sendToHost(session.status === GameStatus.BIP_ALERTE ? 'BIP_RELEASE' : 'BIP_TRIGGER', null)}
+              className="w-full h-28 bg-red-600 rounded-2xl flex flex-col items-center justify-center shadow-[0_-10px_50px_rgba(255,0,0,0.6)] active:scale-95 transition-all border-b-[12px] border-red-900 active:border-b-0 hover:brightness-110"
+            >
+              <span className="text-4xl font-black text-white glow-red italic tracking-tighter uppercase mb-1 font-['Orbitron']">ALERTE BIP</span>
+              <span className="text-[11px] text-red-100 font-black uppercase tracking-[0.6em] opacity-90 animate-pulse">Priorité Opérationnelle</span>
+            </button>
+          </footer>
+      )}
     </div>
   );
 };

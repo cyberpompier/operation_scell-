@@ -36,4 +36,5 @@ export interface GameSession {
   sabotage: SabotageState;
   codisCheckUsed: boolean;
   alertMsg?: string;
+  votes: Record<string, string>; // ID votant -> ID accusé
 }
