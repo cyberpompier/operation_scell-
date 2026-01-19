@@ -4,7 +4,9 @@ import { Role } from "../types.ts";
 
 export async function generateBriefing(role: Role, name: string): Promise<string> {
   try {
-    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+    // Initialisation locale pour éviter les erreurs de top-level scope
+    // Utilisation de la variable GEMINI_API_KEY configurée sur Netlify
+    const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
     const response = await ai.models.generateContent({
       model: 'gemini-3-flash-preview',
       contents: `Génère un court message de briefing militaire (max 150 caractères) pour un joueur nommé "${name}" dont le rôle secret est "${role}". Utilise un ton sérieux et opérationnel de sapeur-pompier. Utilise les termes techniques: Neutralisé, Infiltré, Mise à pied, CODIS, Scellé.`,
@@ -21,7 +23,7 @@ export async function generateBriefing(role: Role, name: string): Promise<string
 
 export async function analyzeIntel(playerName: string, targetName: string): Promise<string> {
     try {
-      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+      const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
       const response = await ai.models.generateContent({
         model: 'gemini-3-flash-preview',
         contents: `Génère un rapport de renseignement CODIS cryptique pour ${playerName} enquêtant sur ${targetName}. Ne révèle pas directement le rôle, mais donne un indice tactique suggérant s'il est un allié ou une menace potentielle (Infiltré).`,

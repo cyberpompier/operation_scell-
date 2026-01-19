@@ -107,18 +107,7 @@ const App: React.FC = () => {
           alertMsg: "SABOTAGE DÉJOUÉ PAR LA GARDE !"
         });
         setTimeout(() => {
-            // Reset automatique pour permettre un nouveau sabotage
-            broadcastSession({ 
-              ...sessionRef.current, 
-              alertMsg: undefined,
-              sabotage: { 
-                isActive: false, 
-                startTime: null, 
-                targetId: null, 
-                status: 'IDLE',
-                photoUri: undefined 
-              }
-            });
+            broadcastSession({ ...sessionRef.current, alertMsg: undefined });
         }, 4000);
         break;
       case 'SABOTAGE_SUCCESS_TIMER':
@@ -127,20 +116,6 @@ const App: React.FC = () => {
           sabotage: { ...current.sabotage, status: 'COMPLETED', isActive: false },
           alertMsg: "SCELLÉ COMPROMIS - ZONE ROUGE"
         });
-        setTimeout(() => {
-             // Reset automatique après succès pour permettre la suite
-             broadcastSession({ 
-                ...sessionRef.current, 
-                alertMsg: undefined,
-                sabotage: { 
-                    isActive: false, 
-                    startTime: null, 
-                    targetId: null, 
-                    status: 'IDLE',
-                    photoUri: undefined
-                }
-            });
-        }, 6000);
         break;
       case 'START_VOTE':
         broadcastSession({
