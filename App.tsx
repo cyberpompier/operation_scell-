@@ -87,13 +87,28 @@ const App: React.FC = () => {
         }
         break;
       case 'SABOTAGE_START':
+        // Étape 1 : L'infiltré demande le sabotage -> On ouvre l'interface caméra (READY_FOR_UPLOAD)
+        // Pas de timer ici, pas d'alerte générale encore.
         broadcastSession({
           ...current,
-          sabotage: { isActive: true, startTime: Date.now(), targetId: null, status: 'PENDING' },
+          sabotage: { isActive: true, startTime: null, targetId: null, status: 'READY_FOR_UPLOAD' },
+        });
+        break;
+      case 'SABOTAGE_CONFIRM':
+        // Étape 2 : Photo reçue -> On lance le timer (PENDING) et l'alerte
+        broadcastSession({
+          ...current,
+          sabotage: { 
+            ...current.sabotage, 
+            status: 'PENDING', 
+            startTime: Date.now(),
+            photoUri: action.payload // La photo est stockée
+          },
           alertMsg: "INTRUSION DÉTECTÉE - SCAN EN COURS"
         });
         break;
       case 'SABOTAGE_REPORT':
+        // Les gardes ont trouvé le sabotage avant la fin du timer
         broadcastSession({
           ...current,
           sabotage: { ...current.sabotage, isActive: false, status: 'DEJOUÉ' },
@@ -103,10 +118,11 @@ const App: React.FC = () => {
             broadcastSession({ ...sessionRef.current, alertMsg: undefined });
         }, 4000);
         break;
-      case 'SABOTAGE_COMPLETE':
+      case 'SABOTAGE_SUCCESS_TIMER':
+        // Le timer est fini sans intervention des gardes -> Victoire Infiltré
         broadcastSession({
           ...current,
-          sabotage: { ...current.sabotage, status: 'COMPLETED', photoUri: action.payload, isActive: false },
+          sabotage: { ...current.sabotage, status: 'COMPLETED', isActive: false },
           alertMsg: "SCELLÉ COMPROMIS - ZONE ROUGE"
         });
         break;
@@ -253,22 +269,25 @@ const App: React.FC = () => {
       const p = session.players.find(pl => pl.id === currentPlayer.id);
       if (p) generateBriefing(p.role, p.name).then(setBriefing);
     }
-  }, [session.status, currentPlayer?.role]); // Changé dépendance pour régénérer si le rôle change
+  }, [session.status, currentPlayer?.role]);
 
+  // TIMER SABOTAGE (Seulement si statut PENDING, c'est à dire après la photo)
   useEffect(() => {
-    if (session.sabotage.isActive && session.sabotage.startTime && session.sabotage.status === 'PENDING') {
+    if (session.sabotage.status === 'PENDING' && session.sabotage.startTime) {
       const timer = setInterval(() => {
         const elapsed = Date.now() - (session.sabotage.startTime || 0);
         const remaining = Math.max(0, SABOTAGE_TIMER_MS - elapsed);
         setSabotageTimeLeft(remaining);
+        
+        // Fin du timer = Sabotage réussi par l'Infiltré
         if (remaining <= 0 && isHost) {
-          broadcastSession({ ...sessionRef.current, sabotage: { ...sessionRef.current.sabotage, status: 'READY_FOR_UPLOAD' } });
+          actionRef.current('mj', { type: 'SABOTAGE_SUCCESS_TIMER', payload: null });
           clearInterval(timer);
         }
       }, 1000);
       return () => clearInterval(timer);
     }
-  }, [session.sabotage.isActive, session.sabotage.startTime, session.sabotage.status, isHost]);
+  }, [session.sabotage.status, session.sabotage.startTime, isHost]);
 
   const handleStartGame = () => {
     if (!isHost) return;
@@ -460,18 +479,24 @@ const App: React.FC = () => {
                     </ul>
                  </div>
 
-                 {session.sabotage.isActive && (
+                 {session.sabotage.status === 'PENDING' && (
                     <div className="bg-red-950/30 p-4 border border-red-900/50 animate-pulse">
                         <p className="text-[10px] text-red-400 uppercase tracking-widest mb-1">Sabotage en cours</p>
                         <p className="text-3xl font-black text-red-500 font-mono">
                             {Math.floor(sabotageTimeLeft/1000/60)}:{Math.floor((sabotageTimeLeft/1000)%60).toString().padStart(2,'0')}
                         </p>
+                        {session.sabotage.photoUri && (
+                            <div className="mt-2">
+                                <p className="text-[8px] text-red-300 uppercase">Preuve capturée</p>
+                                <img src={session.sabotage.photoUri} className="w-16 h-16 object-cover border border-red-500" />
+                            </div>
+                        )}
                     </div>
                  )}
 
                  {session.sabotage.status === 'COMPLETED' && session.sabotage.photoUri && (
                      <div className="space-y-2">
-                        <p className="text-[10px] text-green-400 uppercase tracking-widest">Preuve de sabotage reçue</p>
+                        <p className="text-[10px] text-green-400 uppercase tracking-widest">Sabotage Confirmé</p>
                         <img src={session.sabotage.photoUri} className="w-full border-2 border-green-500" alt="Preuve" />
                      </div>
                  )}
@@ -482,17 +507,12 @@ const App: React.FC = () => {
         {/* --- INTERFACE INFILTRÉ --- */}
         {currentPlayer?.role === Role.INFILTRÉ && (
           <div className="space-y-5">
+            {/* Etape 1 : Bouton initial */}
             {session.sabotage.status === 'IDLE' && (
                <button onClick={() => sendToHost('SABOTAGE_START', null)} className="w-full bg-red-600 text-white p-8 font-black uppercase tracking-[0.5em] text-sm shadow-[0_15px_40px_rgba(255,0,0,0.5)] border-b-8 border-red-900 active:translate-y-1 transition-all">LANCER SABOTAGE</button>
             )}
-            {session.sabotage.status === 'PENDING' && (
-               <HUDFrame title="Latence de Sécurité" variant="alert">
-                  <div className="text-8xl font-black text-center text-red-500 font-mono py-10 tracking-[0.2em] glow-red animate-pulse">
-                    {Math.floor(sabotageTimeLeft/1000/60)}:{Math.floor((sabotageTimeLeft/1000)%60).toString().padStart(2,'0')}
-                  </div>
-                  <p className="text-[10px] text-center opacity-70 uppercase font-black tracking-[0.4em]">Progression furtive vers le scellé...</p>
-               </HUDFrame>
-            )}
+
+            {/* Etape 2 : Prise de photo (READY_FOR_UPLOAD) - Pas encore de timer public */}
             {session.sabotage.status === 'READY_FOR_UPLOAD' && (
               <HUDFrame title="Preuve de Neutralisation" variant="alert">
                 <div className="space-y-5">
@@ -518,26 +538,43 @@ const App: React.FC = () => {
                     </div>
                   )}
                   <button onClick={() => {
-                     setShowSuccessOverlay(true);
-                     setTimeout(() => setShowSuccessOverlay(false), 3000);
-                     sendToHost('SABOTAGE_COMPLETE', capturedPhoto);
+                     // Envoi de la photo -> Déclenche le timer (PENDING)
+                     sendToHost('SABOTAGE_CONFIRM', capturedPhoto);
                      setCapturedPhoto(null);
-                  }} disabled={!capturedPhoto} className="w-full bg-red-600 text-white p-7 font-black uppercase tracking-[0.3em] text-sm disabled:opacity-30 border-b-8 border-red-900 shadow-xl">TRANSMETTRE AU CENTRAL</button>
+                  }} disabled={!capturedPhoto} className="w-full bg-red-600 text-white p-7 font-black uppercase tracking-[0.3em] text-sm disabled:opacity-30 border-b-8 border-red-900 shadow-xl">VALIDER LE SABOTAGE</button>
                 </div>
               </HUDFrame>
+            )}
+
+            {/* Etape 3 : Timer en cours (PENDING) */}
+            {session.sabotage.status === 'PENDING' && (
+               <HUDFrame title="Latence de Sécurité" variant="alert">
+                  <div className="text-8xl font-black text-center text-red-500 font-mono py-10 tracking-[0.2em] glow-red animate-pulse">
+                    {Math.floor(sabotageTimeLeft/1000/60)}:{Math.floor((sabotageTimeLeft/1000)%60).toString().padStart(2,'0')}
+                  </div>
+                  <p className="text-[10px] text-center opacity-70 uppercase font-black tracking-[0.4em]">Sabotage actif. Restez furtif.</p>
+               </HUDFrame>
+            )}
+            
+            {/* Etape 4 : Succès (COMPLETED) */}
+             {session.sabotage.status === 'COMPLETED' && (
+               <div className="bg-green-500/20 p-6 border-2 border-green-500 text-center">
+                   <h2 className="text-2xl font-black text-green-400 mb-2 uppercase">Mission Accomplie</h2>
+                   <p className="text-[10px] uppercase tracking-widest text-green-200">Zone Scellée Compromise</p>
+               </div>
             )}
           </div>
         )}
 
         {/* --- INTERFACE GARDE (Tout le monde sauf MJ et Infiltré) --- */}
         {currentPlayer?.role !== Role.MJ && currentPlayer?.role !== Role.INFILTRÉ && (
-           <HUDFrame title="Module de Garde" variant={session.sabotage.isActive ? 'alert' : 'muted'}>
+           <HUDFrame title="Module de Garde" variant={session.sabotage.status === 'PENDING' ? 'alert' : 'muted'}>
               <button 
                 onClick={() => sendToHost('SABOTAGE_REPORT', null)} 
-                disabled={!session.sabotage.isActive}
-                className={`w-full p-8 font-black uppercase tracking-[0.4em] text-[11px] border-4 transition-all ${session.sabotage.isActive ? 'border-red-600 text-red-500 animate-pulse bg-red-950/40 shadow-[0_0_30px_rgba(255,0,0,0.3)]' : 'border-slate-800 text-slate-700 opacity-60'}`}
+                disabled={session.sabotage.status !== 'PENDING'}
+                className={`w-full p-8 font-black uppercase tracking-[0.4em] text-[11px] border-4 transition-all ${session.sabotage.status === 'PENDING' ? 'border-red-600 text-red-500 animate-pulse bg-red-950/40 shadow-[0_0_30px_rgba(255,0,0,0.3)]' : 'border-slate-800 text-slate-700 opacity-60'}`}
               >
-                {session.sabotage.isActive ? "ANOMALIE DÉTECTÉE ! SIGNALER" : "ZÉRO ACTIVITÉ SUSPECTE"}
+                {session.sabotage.status === 'PENDING' ? "ANOMALIE DÉTECTÉE ! SIGNALER" : "ZÉRO ACTIVITÉ SUSPECTE"}
               </button>
            </HUDFrame>
         )}
